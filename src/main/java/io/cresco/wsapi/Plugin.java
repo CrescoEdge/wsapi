@@ -1,5 +1,6 @@
 package io.cresco.wsapi;
 
+import io.cresco.wsapi.websockets.APIDataPlane;
 import io.cresco.wsapi.websockets.APISocket;
 import io.cresco.library.agent.AgentService;
 import io.cresco.library.messaging.MsgEvent;
@@ -164,6 +165,7 @@ public class Plugin implements PluginService {
                 // Add WebSocket endpoint to javax.websocket layer
                 //wscontainer.addEndpoint(LogSocket.class);
                 wscontainer.addEndpoint(APISocket.class);
+                wscontainer.addEndpoint(APIDataPlane.class);
 
                 //startWS();
 
