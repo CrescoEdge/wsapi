@@ -6,12 +6,12 @@ addons:
       secure: lyVif4kFbMEouOD/Xtqs+zG2THeqsthkW6E0u63R+0DkIolgbvfrbjLPOdcnZh2mKGsvKt3AZdm4jaHXt/ZQFn2YvR//qzveKTv8R2x76OBPNFzbqnNVyJYAAUcUIXImdQkDz2yi15Vz6cRhfpV6bIBCXwATjWk6RZslUKCFTWi+37Ircg0bEWEF3/HChfy1l0eirZpEzf2t/mvp4jYGc/Ih+s0RDHtFTx1svrUj4TpmiJ0zst4fpDpZ27gVmR2S5sN3z2B7uYYDd17amIwZiCXdyUtO1ocWoZ3gioaCOLrcgMRCXawwhubschNMQeIMqp+j+BOT9LZ3W1GHy7O9wvWy6MrjfWHkmknmnbP6xGPaTxKnwGXjImIfoyg1Mdl7kKvP1P+F4QuXxdSBaVO/zpqFrqj84UrM/oK+4iszEWIBOzN1W1ClflDR7eW+x1zTTuxlXVQlt99+chsctMkKVBBZvPZgxlkCFCtq6WLoEM2Ug30tCY6ZhbPx6YvUzneeegZzMmY5reU0Pl1czWVtuVolzU1n3NrX0bCrg3XuF8u747XP/1SppbtAZGyUFiNnTTiT1+/vWfuvQV0fp8F0/SxM7NLRqj0gM7xJlAgbH04M3KWt5QFzlAViP7b1hApnI2j2k2NdbAc0kuSBC430+0aQrgv3NJtPcKCnmTeMgdQ=
 
 script:
-- mvn clean org.jacoco:jacoco-maven-plugin:prepare-agent install sonar:sonar
+  - mvn clean org.jacoco:jacoco-maven-plugin:prepare-agent install sonar:sonar
 after_success:
-- mvn package bundle:bundle
-- mvn deploy:deploy-file -Dfile=target/wsapi-1.1-SNAPSHOT.jar -Durl=https://oss.sonatype.org/content/repositories/snapshots -DrepositoryId=ossrh -DpomFile=pom.xml --settings travis-settings.xml -DskipTests=true -B
-- bash <(curl -s https://codecov.io/bash)
+  - mvn package bundle:bundle
+  - mvn deploy:deploy-file -Dfile=target/wsapi-1.1-SNAPSHOT.jar -Durl=https://oss.sonatype.org/content/repositories/snapshots -DrepositoryId=ossrh -DpomFile=pom.xml --settings travis-settings.xml -DskipTests=true -B
+  - bash <(curl -s https://codecov.io/bash)
 env:
   global:
-  - SONATYPE_USERNAME=crescoedge
-  - secure: V+Jl2TPDf6KaMIBMLDxSJ9IB66Q/iVg+9Ba4IRTpbcMB/YgEhHKdwcO/gC62oQDy8BlvJ4I4qv2O2GmurJqEXjQQxwWNWcMnA4CeS0FZCWPQBuZbTXExR0Z1tYbwxYG8kDxK8hPaUjuHs1+c22RLX+1E8QiwREnfFDbQ+bMtoeGS4/f8+pZz0fK+J66D3EEPLBjEsdu8o55cJI8ka56pOXUPP8poLzMqbRHDqPCwLybRkdJXfWeyqK9MXgKd9IJjUd+HLZ8Pe/SJL8gswljMoXM3oxDMGNe32gok3kBzSCDWVyWJ+RzYjZ5csLCbn77wQkpoJhWeY8+sMRG/S0Rw0jc5v4GM/5CF/lQNAVCk/P9jGlJAye3fW0kWQdmI2J3heTlfqR1rUb198+GcGr6bJparwkufiKRaURpWOPDS0zD+nY0+kMBkWwhReJJFbSqcDNRoRAa88XDygbMsaBt0pVMuzoqSxbWqXzgOjwZh3Dabs5OzY2132NbjSB5KIoxGvC7Z5Zc/CjP9dIaJNJnmdHIbh5lvfgexnB9oct1twudqW4pjLK3fjxh3X/C5zbgwqf0G+0AUlmbCbaa127WPc8Jz9InGFYa7xyymEjIdn82kcRfiaRF+9wAAr3g32G/a2C9miF+qqftJLTPoLZc9a8IaTXN23/pSGx7ny1GMIf4=
+    - SONATYPE_USERNAME=crescoedge
+    - secure: V+Jl2TPDf6KaMIBMLDxSJ9IB66Q/iVg+9Ba4IRTpbcMB/YgEhHKdwcO/gC62oQDy8BlvJ4I4qv2O2GmurJqEXjQQxwWNWcMnA4CeS0FZCWPQBuZbTXExR0Z1tYbwxYG8kDxK8hPaUjuHs1+c22RLX+1E8QiwREnfFDbQ+bMtoeGS4/f8+pZz0fK+J66D3EEPLBjEsdu8o55cJI8ka56pOXUPP8poLzMqbRHDqPCwLybRkdJXfWeyqK9MXgKd9IJjUd+HLZ8Pe/SJL8gswljMoXM3oxDMGNe32gok3kBzSCDWVyWJ+RzYjZ5csLCbn77wQkpoJhWeY8+sMRG/S0Rw0jc5v4GM/5CF/lQNAVCk/P9jGlJAye3fW0kWQdmI2J3heTlfqR1rUb198+GcGr6bJparwkufiKRaURpWOPDS0zD+nY0+kMBkWwhReJJFbSqcDNRoRAa88XDygbMsaBt0pVMuzoqSxbWqXzgOjwZh3Dabs5OzY2132NbjSB5KIoxGvC7Z5Zc/CjP9dIaJNJnmdHIbh5lvfgexnB9oct1twudqW4pjLK3fjxh3X/C5zbgwqf0G+0AUlmbCbaa127WPc8Jz9InGFYa7xyymEjIdn82kcRfiaRF+9wAAr3g32G/a2C9miF+qqftJLTPoLZc9a8IaTXN23/pSGx7ny1GMIf4=
