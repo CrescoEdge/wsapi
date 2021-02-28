@@ -13,7 +13,7 @@ import java.lang.reflect.Type;
 import java.util.*;
 
 @ClientEndpoint
-@ServerEndpoint(value="/dashboard/apisocket")
+@ServerEndpoint(value="/api/apisocket")
 public class APISocket
 {
     private static final Set<Session> sessions = Collections.synchronizedSet(new HashSet<>());
