@@ -62,6 +62,8 @@ public class APIDataPlane
 
         createListener(sess, message);
 
+        sess.getAsyncRemote().sendObject("created");
+
         //Map<String, Map<String, String>> incoming_message = gson.fromJson(message, type);
 
         //MsgEvent request = GetResponceMsgEvent(incoming_message);
@@ -106,7 +108,7 @@ public class APIDataPlane
                     }
                 }
             };
-
+            logger.error("creating listener: " + "stream_name='" + stream_name + "'");
             plugin.getAgentService().getDataPlaneService().addMessageListener(TopicType.AGENT,ml,"stream_name='" + stream_name + "'");
 
 
