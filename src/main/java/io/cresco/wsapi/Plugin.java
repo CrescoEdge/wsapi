@@ -47,7 +47,7 @@ public class Plugin implements PluginService {
     private ConfigurationAdmin configurationAdmin;
     private Map<String,Object> map;
     private Server jettyServer;
-    private ServletHolder jerseyServlet;
+    private ServerContainer wscontainer;
 
     @Activate
     void activate(BundleContext context, Map<String,Object> map) {
@@ -161,6 +161,7 @@ public class Plugin implements PluginService {
 
                 ServerContainer wscontainer = WebSocketServerContainerInitializer.configureContext(context);
 
+
                 //javax.websocket.Session.setMaxTextMessageBufferSize(int)
                 // Add WebSocket endpoint to javax.websocket layer
                 //wscontainer.addEndpoint(LogSocket.class);
@@ -193,13 +194,31 @@ public class Plugin implements PluginService {
     @Override
     public boolean isStopped() {
 
+
+
+        if(wscontainer != null) {
+            if(!wscontainer.isStopped()) {
+                try {
+
+                    wscontainer.stop();
+                    while(!wscontainer.isStopped()) {
+                        logger.error("Waiting on WSAPI (wscontainer) to stop.");
+                    }
+
+                } catch (Exception ex) {
+                    logger.error("embedded web server shutdown error : " + ex.getMessage());
+                    ex.printStackTrace();
+                }
+            }
+        }
+
         if(jettyServer != null) {
             if(!jettyServer.isStopped()) {
                 try {
 
                     jettyServer.stop();
                     while(!jettyServer.isStopped()) {
-                        logger.error("Waiting on Dashboard to stop.");
+                        logger.error("Waiting on WSAPI (server) to stop.");
                     }
 
                 } catch (Exception ex) {
