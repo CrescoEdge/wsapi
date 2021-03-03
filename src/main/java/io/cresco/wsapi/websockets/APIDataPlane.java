@@ -57,6 +57,7 @@ public class APIDataPlane
     public void onWebSocketText(Session sess, String message)
     {
         Map<String, String> responce = new HashMap<>();
+        responce.put("stream_query",message);
         try {
 
             if (createListener(sess, message)) {
@@ -100,8 +101,8 @@ public class APIDataPlane
                     }
                 }
             };
-            logger.error("creating listener: " + "stream_query='" + stream_query + "'");
-            plugin.getAgentService().getDataPlaneService().addMessageListener(TopicType.AGENT,ml,"stream_name='" + stream_query + "'");
+            logger.error("creating listener: " + "stream_query=" + stream_query + "");
+            plugin.getAgentService().getDataPlaneService().addMessageListener(TopicType.AGENT,ml,stream_query);
             isCreated = true;
 
         } catch (Exception ex) {
