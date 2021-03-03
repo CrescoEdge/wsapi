@@ -49,47 +49,39 @@ public class APIDataPlane
         String logSessionId = UUID.randomUUID().toString();
         sessionMap.put(sess.getId(),logSessionId);
         //System.out.println("Socket Connected: " + sess);
-        logger.info("Socket Connected: " + sess.getId());
+        //logger.info("Socket Connected: " + sess.getId());
 
     }
 
     @OnMessage
     public void onWebSocketText(Session sess, String message)
     {
-        String r;
+        Map<String, String> responce = new HashMap<>();
+        try {
 
-        logger.error("message: " + message);
+            if (createListener(sess, message)) {
+                responce.put("status_code", "10");
+                responce.put("status_desc", "Listener Active");
 
-        createListener(sess, message);
+            } else {
+                responce.put("status_code", "9");
+                responce.put("status_desc", "Could not activate listener");
 
-        sess.getAsyncRemote().sendObject("created");
-
-        //Map<String, Map<String, String>> incoming_message = gson.fromJson(message, type);
-
-        //MsgEvent request = GetResponceMsgEvent(incoming_message);
-
-        //boolean isRPC  = Boolean.valueOf(incoming_message.get("message_info").get("is_rpc"));
-        /*
-        MsgEvent response = null;
-        if(isRPC) {
-            response = plugin.sendRPC(request);
-            if (response == null)
-                r = "{\"error\":\"Cresco rpc response was null\"}";
-            else {
-                r = gson.toJson(response.getParams());
             }
 
-            sess.getAsyncRemote().sendObject(r);
-        } else {
-            plugin.msgOut(request);
+        } catch (Exception ex) {
+            ex.printStackTrace();
+            responce.put("status_code", "90");
+            responce.put("status_desc", ex.getMessage());
+            ex.printStackTrace();
         }
 
-         */
+        sess.getAsyncRemote().sendObject(gson.toJson(responce));
 
     }
 
-    private void createListener(Session sess, String stream_name) {
-
+    private boolean createListener(Session sess, String stream_query) {
+        boolean isCreated = false;
         try{
 
             javax.jms.MessageListener ml = new javax.jms.MessageListener() {
@@ -108,56 +100,21 @@ public class APIDataPlane
                     }
                 }
             };
-            logger.error("creating listener: " + "stream_name='" + stream_name + "'");
-            plugin.getAgentService().getDataPlaneService().addMessageListener(TopicType.AGENT,ml,"stream_name='" + stream_name + "'");
-
+            logger.error("creating listener: " + "stream_query='" + stream_query + "'");
+            plugin.getAgentService().getDataPlaneService().addMessageListener(TopicType.AGENT,ml,"stream_name='" + stream_query + "'");
+            isCreated = true;
 
         } catch (Exception ex) {
             ex.printStackTrace();
         }
 
-
+        return isCreated;
     }
-
-    private MsgEvent GetResponceMsgEvent(Map<String, Map<String, String>> incoming_message) {
-        MsgEvent request = null;
-        try {
-
-            Map<String,String> messageInfo = incoming_message.get("message_info");
-            Map<String,String> messagePayload = incoming_message.get("message_payload");
-
-            String messageType = messageInfo.get("message_type");
-
-            switch (messageType) {
-
-                case "global_controller_msgevent":
-                    //request = GlobalControllerMsgEvent(messageInfo);
-                    break;
-
-
-                default:
-                    logger.error("Unknown message type");
-
-            }
-
-            for (Map.Entry<String, String> entry : messagePayload.entrySet()) {
-                String key = entry.getKey();
-                String value = entry.getValue();
-                request.setParam(key, value);
-            }
-
-
-        } catch (Exception ex) {
-            logger.error(ex.getMessage());
-        }
-        return request;
-    }
-
 
     @OnClose
     public void onWebSocketClose(Session sess, CloseReason reason)
     {
-        logger.info("Socket Closed: " + reason);
+        //logger.info("Socket Closed: " + reason);
         //System.out.println("Socket Closed: " + reason);
 
         if(activeHost.containsKey(sess.getId())) {
