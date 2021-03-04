@@ -20,6 +20,7 @@ public class APILogStreamer
     private static final Set<Session> sessions = Collections.synchronizedSet(new HashSet<>());
     private static final Map<String,SessionInfo> activeHost = Collections.synchronizedMap(new HashMap<>());
     private static final Map<String,String> sessionMap = Collections.synchronizedMap(new HashMap<>());
+    private static final Map<String,String> listenerMap = Collections.synchronizedMap(new HashMap<>());
 
 
     private PluginBuilder plugin;
@@ -78,7 +79,8 @@ public class APILogStreamer
 
         String DPQuery = "region_id IS NOT NULL AND agent_id IS NOT NULL AND event = 'logger' AND session_id = '" + logSessionId + "'";
         //String DPQuery = "region_id IS NOT NULL AND agent_id IS NOT NULL AND event = 'logger'";
-        Plugin.pluginBuilder.getAgentService().getDataPlaneService().addMessageListener(TopicType.AGENT,ml,DPQuery);
+        String listenerid = Plugin.pluginBuilder.getAgentService().getDataPlaneService().addMessageListener(TopicType.AGENT,ml,DPQuery);
+        listenerMap.put(logSessionId,listenerid);
         sess.getAsyncRemote().sendObject("ok");
     }
 
@@ -101,7 +103,7 @@ public class APILogStreamer
                 logger.info("DPLogger levelset: " + isLoggerSet + " for session: " + sess.getId() + " region:" + region_id + " agent_id:" + agent_id);
             }
 
-            /*
+
             MsgEvent req = plugin.getGlobalAgentMsgEvent(MsgEvent.Type.CONFIG, region_id, agent_id);
             req.setParam("action","setloglevel");
             req.setParam("baseclassname", baseclass);
@@ -125,8 +127,8 @@ public class APILogStreamer
             }
             sess.getAsyncRemote().sendObject(respMessage);
 
-             */
-            sess.getAsyncRemote().sendObject("enabled");
+
+            //sess.getAsyncRemote().sendObject("enabled");
         }
 
     }
@@ -136,6 +138,11 @@ public class APILogStreamer
     {
         logger.info("Socket Closed: " + reason);
         //System.out.println("Socket Closed: " + reason);
+
+
+        String listenerid = listenerMap.get(sessionMap.get(sess.getId()));
+        //so we don't get messages about disabling logger
+        Plugin.pluginBuilder.getAgentService().getDataPlaneService().removeMessageListener(listenerid);
 
         if(activeHost.containsKey(sess.getId())) {
             SessionInfo sessionInfo = activeHost.get(sess.getId());
