@@ -127,7 +127,6 @@ public class APILogStreamer
             }
             sess.getAsyncRemote().sendObject(respMessage);
 
-
             //sess.getAsyncRemote().sendObject("enabled");
         }
 
