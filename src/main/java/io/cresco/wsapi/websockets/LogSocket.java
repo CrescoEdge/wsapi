@@ -21,7 +21,6 @@ public class LogSocket
     private static final Map<String,SessionInfo> activeHost = Collections.synchronizedMap(new HashMap<>());
     private static final Map<String,String> sessionMap = Collections.synchronizedMap(new HashMap<>());
 
-
     private PluginBuilder plugin;
     private CLogger logger;
 
