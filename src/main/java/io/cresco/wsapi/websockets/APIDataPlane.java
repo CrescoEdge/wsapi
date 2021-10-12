@@ -46,8 +46,7 @@ public class APIDataPlane
         sess.setMaxBinaryMessageBufferSize(50000000);
         sess.setMaxTextMessageBufferSize(50000000);
         sessions.add(sess);
-        String logSessionId = UUID.randomUUID().toString();
-        sessionMap.put(sess.getId(),logSessionId);
+        //String logSessionId = UUID.randomUUID().toString();
         //System.out.println("Socket Connected: " + sess);
         //logger.info("Socket Connected: " + sess.getId());
 
@@ -101,8 +100,11 @@ public class APIDataPlane
                     }
                 }
             };
-            logger.error("creating listener: " + "stream_query=" + stream_query + "");
-            plugin.getAgentService().getDataPlaneService().addMessageListener(TopicType.AGENT,ml,stream_query);
+            //logger.error("APIDataPlane: creating listener: " + "stream_query=" + stream_query + "");
+            String listenerid = plugin.getAgentService().getDataPlaneService().addMessageListener(TopicType.AGENT,ml,stream_query);
+            sessionMap.put(sess.getId(),listenerid);
+            //sess.getAsyncRemote().sendObject("APIDataPlane Connected Session: " + sess.getId());
+
             isCreated = true;
 
         } catch (Exception ex) {
@@ -117,6 +119,10 @@ public class APIDataPlane
     {
         //logger.info("Socket Closed: " + reason);
         //System.out.println("Socket Closed: " + reason);
+
+        String listenerid = sessionMap.get(sess.getId());
+        //so we don't get messages about disabling logger
+        Plugin.pluginBuilder.getAgentService().getDataPlaneService().removeMessageListener(listenerid);
 
         if(activeHost.containsKey(sess.getId())) {
             SessionInfo sessionInfo = activeHost.get(sess.getId());

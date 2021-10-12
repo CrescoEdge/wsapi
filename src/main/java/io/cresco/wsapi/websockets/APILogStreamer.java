@@ -1,5 +1,6 @@
 package io.cresco.wsapi.websockets;
 
+import com.google.gson.Gson;
 import io.cresco.library.data.TopicType;
 import io.cresco.library.messaging.MsgEvent;
 import io.cresco.library.plugin.PluginBuilder;
@@ -21,7 +22,7 @@ public class APILogStreamer
     private static final Map<String,SessionInfo> activeHost = Collections.synchronizedMap(new HashMap<>());
     private static final Map<String,String> sessionMap = Collections.synchronizedMap(new HashMap<>());
     private static final Map<String,String> listenerMap = Collections.synchronizedMap(new HashMap<>());
-
+    private static final Gson gson = new Gson();
 
     private PluginBuilder plugin;
     private CLogger logger;
@@ -46,43 +47,69 @@ public class APILogStreamer
         //System.out.println("Socket Connected: " + sess);
         logger.info("Socket Connected: " + sess.getId());
 
-        MessageListener ml = new MessageListener() {
+        Map<String, String> responce = new HashMap<>();
 
-            public void onMessage(Message msg) {
-                try {
+        try {
 
-                    if (msg instanceof TextMessage) {
+            if (createListener(sess, logSessionId)) {
+                responce.put("status_code", "10");
+                responce.put("status_desc", "Listener Active");
 
-                        TextMessage textMessage = (TextMessage)msg;
-                        //System.out.println("MESSAGE: [" + textMessage + "]");
-                        /*
-                        TextMessage textMessage = pluginBuilder.getAgentService().getDataPlaneService().createTextMessage();
-                    textMessage.setStringProperty("event","logger");
-                    textMessage.setStringProperty("pluginname",pluginBuilder.getConfig().getStringParam("pluginname"));
-                    textMessage.setStringProperty("region_id",pluginBuilder.getRegion());
-                    textMessage.setStringProperty("agent_id",pluginBuilder.getAgent());
-                    textMessage.setStringProperty("plugin_id", pluginBuilder.getPluginID());
-                    textMessage.setStringProperty("loglevel", loglevel);
-                    textMessage.setText(message);
-                         */
+            } else {
+                responce.put("status_code", "9");
+                responce.put("status_desc", "Could not activate listener");
 
-                        String messageString = textMessage.getStringProperty("region_id") + "_" + textMessage.getStringProperty("agent_id") + " [ " + textMessage.getStringProperty("logid") + "] " + textMessage.getStringProperty("loglevel") + " " + textMessage.getText();
-                        sess.getAsyncRemote().sendObject(messageString);
-                    }
-
-                } catch(Exception ex) {
-
-                    ex.printStackTrace();
-                }
             }
-        };
 
-        String DPQuery = "region_id IS NOT NULL AND agent_id IS NOT NULL AND event = 'logger' AND session_id = '" + logSessionId + "'";
-        //String DPQuery = "region_id IS NOT NULL AND agent_id IS NOT NULL AND event = 'logger'";
-        String listenerid = Plugin.pluginBuilder.getAgentService().getDataPlaneService().addMessageListener(TopicType.AGENT,ml,DPQuery);
-        listenerMap.put(logSessionId,listenerid);
-        sess.getAsyncRemote().sendObject("ok");
+        } catch (Exception ex) {
+            ex.printStackTrace();
+            responce.put("status_code", "90");
+            responce.put("status_desc", ex.getMessage());
+            ex.printStackTrace();
+        }
+
+        sess.getAsyncRemote().sendObject(gson.toJson(responce));
+
     }
+
+    private boolean createListener(Session sess, String logSessionId) {
+        boolean isCreated = false;
+        try{
+
+            MessageListener ml = new MessageListener() {
+
+                public void onMessage(Message msg) {
+                    try {
+
+                        if (msg instanceof TextMessage) {
+
+                            TextMessage textMessage = (TextMessage)msg;
+
+                            String messageString = textMessage.getStringProperty("region_id") + "_" + textMessage.getStringProperty("agent_id") + " [ " + textMessage.getStringProperty("logid") + "] " + textMessage.getStringProperty("loglevel") + " " + textMessage.getText();
+                            sess.getAsyncRemote().sendObject(messageString);
+                        }
+
+                    } catch(Exception ex) {
+
+                        ex.printStackTrace();
+                    }
+                }
+            };
+
+            String DPQuery = "region_id IS NOT NULL AND agent_id IS NOT NULL AND event = 'logger' AND session_id = '" + logSessionId + "'";
+            //String DPQuery = "region_id IS NOT NULL AND agent_id IS NOT NULL AND event = 'logger'";
+            String listenerid = Plugin.pluginBuilder.getAgentService().getDataPlaneService().addMessageListener(TopicType.AGENT,ml,DPQuery);
+            listenerMap.put(logSessionId,listenerid);
+
+            isCreated = true;
+
+        } catch (Exception ex) {
+            ex.printStackTrace();
+        }
+
+        return isCreated;
+    }
+
 
     @OnMessage
     public void onWebSocketText(Session sess, String message)
