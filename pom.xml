@@ -101,7 +101,6 @@
             <scope>provided</scope>
         </dependency>
 
-
         <dependency>
             <groupId>com.fasterxml</groupId>
             <artifactId>classmate</artifactId>
