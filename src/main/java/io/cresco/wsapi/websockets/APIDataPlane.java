@@ -179,6 +179,7 @@ public class APIDataPlane
                     }
                 }
             };
+
             //logger.error("APIDataPlane: creating listener: " + "stream_query=" + stream_query + "");
             String stream_query;
 
