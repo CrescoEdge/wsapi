@@ -95,6 +95,7 @@ public class APIDataPlane
                     TextMessage updateMessage = plugin.getAgentService().getDataPlaneService().createTextMessage();
                     updateMessage.setText(message);
                     updateMessage.setStringProperty(identKey, identId);
+                    updateMessage.setStringProperty("type", "input");
 
                     plugin.getAgentService().getDataPlaneService().sendMessage(TopicType.AGENT, updateMessage);
                 } else {
@@ -170,6 +171,7 @@ public class APIDataPlane
                 }
             };
             //logger.error("APIDataPlane: creating listener: " + "stream_query=" + stream_query + "");
+            String stream_query = "stream_name='" + streamInfo.getIdentId() + "' and type='" + "outgoing" + "'";
             String listenerid = plugin.getAgentService().getDataPlaneService().addMessageListener(TopicType.AGENT,ml,streamInfo.getStream_query());
 
             streamInfo.setListenerId(listenerid);
