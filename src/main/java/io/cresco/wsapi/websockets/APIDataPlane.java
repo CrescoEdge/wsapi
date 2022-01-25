@@ -86,16 +86,21 @@ public class APIDataPlane
 
                 String identKey;
                 String identId;
+                String ioTypeKey;
+                String inputId;
+
                 synchronized (lockSessionMap) {
                     identKey = sessionMap.get(sess.getId()).getIdentKey();
                     identId = sessionMap.get(sess.getId()).getIdentId();
+                    ioTypeKey = sessionMap.get(sess.getId()).getIoTypeKey();
+                    inputId = sessionMap.get(sess.getId()).getInputId();
                 }
 
                 if((identKey != null) && (identId != null)) {
                     TextMessage updateMessage = plugin.getAgentService().getDataPlaneService().createTextMessage();
                     updateMessage.setText(message);
                     updateMessage.setStringProperty(identKey, identId);
-                    updateMessage.setStringProperty("type", "input");
+                    updateMessage.setStringProperty(ioTypeKey, inputId);
 
                     plugin.getAgentService().getDataPlaneService().sendMessage(TopicType.AGENT, updateMessage);
                 } else {
@@ -116,13 +121,17 @@ public class APIDataPlane
 
             StreamInfo streamInfo = null;
             if(mapMessage != null) {
-                streamInfo = new StreamInfo(sess.getId(),mapMessage.get("ident_key"), mapMessage.get("ident_id"),mapMessage.get("stream_query"));
+                streamInfo = new StreamInfo(sess.getId(),mapMessage.get("ident_key"), mapMessage.get("ident_id"));
+                streamInfo.setIoTypeKey(mapMessage.get("io_type_key"));
+                streamInfo.setOutputId(mapMessage.get("output_id"));
+                streamInfo.setInputId(mapMessage.get("input_id"));
+
             } else {
                 streamInfo = new StreamInfo(sess.getId(),message);
             }
 
             Map<String, String> responce = new HashMap<>();
-            responce.put("stream_query", message);
+            //responce.put("stream_query", message);
             try {
 
                 if (createListener(sess, streamInfo)) {
@@ -171,8 +180,14 @@ public class APIDataPlane
                 }
             };
             //logger.error("APIDataPlane: creating listener: " + "stream_query=" + stream_query + "");
-            String stream_query = "stream_name='" + streamInfo.getIdentId() + "' and type='" + "outgoing" + "'";
-            String listenerid = plugin.getAgentService().getDataPlaneService().addMessageListener(TopicType.AGENT,ml,streamInfo.getStream_query());
+            String stream_query;
+
+            if(streamInfo.getStream_query() != null) {
+                stream_query = streamInfo.getStream_query();
+            } else {
+                stream_query = streamInfo.getIdentKey() + "='" + streamInfo.getIdentId() + "' and " + streamInfo.getIoTypeKey() + "='" + streamInfo.getOutputId() + "'";
+            }
+            String listenerid = plugin.getAgentService().getDataPlaneService().addMessageListener(TopicType.AGENT,ml,stream_query);
 
             streamInfo.setListenerId(listenerid);
 

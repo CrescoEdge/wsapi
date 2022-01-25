@@ -7,12 +7,43 @@ public class StreamInfo {
     private String identId;
     private String stream_query;
     private String listenerId;
+    private String ioTypeKey;
+    private String outputId;
+    private String inputId;
 
-    public StreamInfo(String sessionId, String identKy, String identId, String stream_query) {
+
+    public void setIdentKey(String identKey) {
+        this.identKey = identKey;
+    }
+
+    public String getIoTypeKey() {
+        return ioTypeKey;
+    }
+
+    public void setIoTypeKey(String ioTypeKey) {
+        this.ioTypeKey = ioTypeKey;
+    }
+
+    public String getOutputId() {
+        return outputId;
+    }
+
+    public void setOutputId(String outputId) {
+        this.outputId = outputId;
+    }
+
+    public String getInputId() {
+        return inputId;
+    }
+
+    public void setInputId(String inputId) {
+        this.inputId = inputId;
+    }
+
+    public StreamInfo(String sessionId, String identKy, String identId) {
         this.sessionId = sessionId;
         this.identKey = identKy;
         this.identId = identId;
-        this.stream_query = stream_query;
     }
 
     public StreamInfo(String sessionId, String stream_query) {

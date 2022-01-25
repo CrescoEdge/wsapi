@@ -68,6 +68,7 @@ public class APISocket
                 r = "{\"error\":\"Cresco rpc response was null\"}";
             else {
                 r = gson.toJson(response.getParams());
+
             }
 
             sess.getAsyncRemote().sendObject(r);

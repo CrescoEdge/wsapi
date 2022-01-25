@@ -158,6 +158,8 @@ public class APILogStreamer
 
     }
 
+
+
     @OnClose
     public void onWebSocketClose(Session sess, CloseReason reason)
     {
