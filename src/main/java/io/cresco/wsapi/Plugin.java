@@ -328,9 +328,14 @@ public class Plugin implements PluginService {
             String agentName = "wsapi-" + UUID.randomUUID();
 
             // yesterday
-            Date validityBeginDate = new Date(System.currentTimeMillis() - 24 * 60 * 60 * 1000);
+            //Date validityBeginDate = new Date(System.currentTimeMillis() - 24 * 60 * 60 * 1000);
             // in 2 years
-            Date validityEndDate = new Date(System.currentTimeMillis() + 25 * 365 * 24 * 60 * 60 * 1000);
+            //Date validityEndDate = new Date(System.currentTimeMillis() + 25 * 365 * 24 * 60 * 60 * 1000);
+
+            DateTime validityBeginDate = DateTime.now().minusDays(1);
+            DateTime validityEndDate = validityBeginDate.plusYears(5);
+
+
 
             // GENERATE THE PUBLIC/PRIVATE RSA KEY PAIR
             KeyPairGenerator keyPairGenerator = KeyPairGenerator.getInstance("RSA", "BC");
@@ -345,8 +350,8 @@ public class Plugin implements PluginService {
             certGen.setSerialNumber(BigInteger.valueOf(System.currentTimeMillis()));
             certGen.setSubjectDN(dnName);
             certGen.setIssuerDN(dnName); // use the same
-            certGen.setNotBefore(validityBeginDate);
-            certGen.setNotAfter(validityEndDate);
+            certGen.setNotBefore(validityBeginDate.toDate());
+            certGen.setNotAfter(validityEndDate.toDate());
             certGen.setPublicKey(keyPair.getPublic());
             certGen.setSignatureAlgorithm("SHA256WithRSAEncryption");
 
