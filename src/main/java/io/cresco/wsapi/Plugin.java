@@ -269,7 +269,7 @@ public class Plugin implements PluginService {
 
             // Create self signed Root CA certificate
 
-            String agentName = "wsapi-" + UUID.randomUUID().toString();
+            String agentName = "wsapi-" + UUID.randomUUID();
 
             //start gen
             KeyPair rootCAKeyPair = generateKeyPair();
@@ -325,12 +325,12 @@ public class Plugin implements PluginService {
 
             // Create self signed Root CA certificate
 
-            String agentName = "wsapi-" + UUID.randomUUID().toString();
+            String agentName = "wsapi-" + UUID.randomUUID();
 
             // yesterday
             Date validityBeginDate = new Date(System.currentTimeMillis() - 24 * 60 * 60 * 1000);
             // in 2 years
-            Date validityEndDate = new Date(System.currentTimeMillis() + 2 * 365 * 24 * 60 * 60 * 1000);
+            Date validityEndDate = new Date(System.currentTimeMillis() + 25 * 365 * 24 * 60 * 60 * 1000);
 
             // GENERATE THE PUBLIC/PRIVATE RSA KEY PAIR
             KeyPairGenerator keyPairGenerator = KeyPairGenerator.getInstance("RSA", "BC");
