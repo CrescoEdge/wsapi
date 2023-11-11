@@ -51,8 +51,7 @@ public class APISocket
     }
 
     @OnMessage
-    public void onWebSocketText(Session sess, String message)
-    {
+    public void onWebSocketText(Session sess, String message) {
         String r;
 
         Map<String, Map<String, String>> incoming_message = gson.fromJson(message, type);
@@ -70,7 +69,6 @@ public class APISocket
                 r = gson.toJson(response.getParams());
 
             }
-
             sess.getAsyncRemote().sendObject(r);
         } else {
             plugin.msgOut(request);
@@ -237,7 +235,6 @@ public class APISocket
         return request;
     }
 
-
     private MsgEvent PluginMsgEvent(Map<String, String> messageInfo) {
         MsgEvent request = null;
         try {
@@ -251,8 +248,6 @@ public class APISocket
         }
         return request;
     }
-
-
 
     @OnClose
     public void onWebSocketClose(Session sess, CloseReason reason)

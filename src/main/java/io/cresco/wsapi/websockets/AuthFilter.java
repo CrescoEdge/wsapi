@@ -8,12 +8,12 @@ import javax.servlet.*;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
-import java.util.Enumeration;
 
 public class AuthFilter implements Filter {
 
     private CLogger logger;
     private PluginBuilder plugin;
+    private String config_service_key;
 
     @Override
     public void init(FilterConfig filterConfig) throws ServletException {
@@ -22,6 +22,7 @@ public class AuthFilter implements Filter {
             if(Plugin.pluginBuilder != null) {
                 plugin = Plugin.pluginBuilder;
                 logger = plugin.getLogger(AuthFilter.class.getName(), CLogger.Level.Info);
+                config_service_key = plugin.getConfig().getStringParam("cresco_service_key");
             }
         }
 
@@ -30,15 +31,28 @@ public class AuthFilter implements Filter {
     @Override
     public void doFilter(ServletRequest servletRequest, ServletResponse servletResponse, FilterChain filterChain) throws IOException, ServletException {
 
-        //httpResponse.sendError(HttpServletResponse.SC_UNAUTHORIZED, "your message goes here");
-        HttpServletRequest httpRequest = (HttpServletRequest) servletRequest;
-        String incoming_service_key = httpRequest.getHeader("cresco_service_key");
-        String config_service_key = plugin.getConfig().getStringParam("cresco_service_key","abc-8675309");
-        if(incoming_service_key.equals(config_service_key)) {
-            filterChain.doFilter(servletRequest, servletResponse);
+        if(config_service_key != null) {
+            HttpServletRequest httpRequest = (HttpServletRequest) servletRequest;
+            String incoming_service_key = httpRequest.getHeader("cresco_service_key");
+
+            if(incoming_service_key != null) {
+                if (incoming_service_key.equals(config_service_key)) {
+                    filterChain.doFilter(servletRequest, servletResponse);
+                } else {
+                    HttpServletResponse httpServletResponse = (HttpServletResponse) servletResponse;
+                    httpServletResponse.sendError(HttpServletResponse.SC_UNAUTHORIZED, "cresco_service_key mismatch");
+                    logger.info("Unauthorized Access: cresco_service_key mismatch");
+                }
+            } else {
+                HttpServletResponse httpServletResponse = (HttpServletResponse) servletResponse;
+                httpServletResponse.sendError(HttpServletResponse.SC_UNAUTHORIZED, "Configuration error: Missing [cresco_service_key] request header");
+                logger.error("Configuration error: Configuration error: Missing [cresco_service_key] request header");
+            }
+
         } else {
             HttpServletResponse httpServletResponse = (HttpServletResponse) servletResponse;
-            httpServletResponse.sendError(HttpServletResponse.SC_UNAUTHORIZED, "cresco service key is incorrect");
+            httpServletResponse.sendError(HttpServletResponse.SC_UNAUTHORIZED, "Configuration error: Missing server-side [cresco_service_key] configuration");
+            logger.error("Configuration error: Missing server-side [cresco_service_key] configuration");
         }
 
     }
