@@ -18,6 +18,7 @@ import org.bouncycastle.cert.X509v3CertificateBuilder;
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
+import org.bouncycastle.x509.X509V1CertificateGenerator;
 import org.eclipse.jetty.http.HttpVersion;
 import org.eclipse.jetty.server.*;
 import org.eclipse.jetty.servlet.FilterHolder;
@@ -30,15 +31,14 @@ import org.osgi.framework.BundleContext;
 import org.osgi.service.cm.ConfigurationAdmin;
 import org.osgi.service.component.annotations.*;
 
+import javax.security.auth.x500.X500Principal;
 import javax.servlet.DispatcherType;
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.PrintWriter;
-import java.io.StringWriter;
+import java.io.*;
 import java.math.BigInteger;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.*;
+import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
 import java.util.*;
 
@@ -248,6 +248,64 @@ public class Plugin implements PluginService {
         kpGen.initialize(1024, new SecureRandom());
         return kpGen.generateKeyPair();
     }
+
+
+    private void generateCertChainKeyStore_old(Path kyStorePath) {
+
+        try {
+
+            Path pluginDataDir = Paths.get(pluginBuilder.getPluginDataDirectory());
+            if (!pluginDataDir.toFile().exists()) {
+
+                pluginDataDir.toFile().mkdirs();
+
+            }
+
+            KeyStore ks = KeyStore.getInstance(KeyStore.getDefaultType());
+
+            char[] password = "cresco".toCharArray();
+            ks.load(null, password);
+
+
+            // Create self signed Root CA certificate
+
+            String agentName = "wsapi-" + UUID.randomUUID();
+
+            //start gen
+            KeyPair rootCAKeyPair = generateKeyPair();
+
+            X509v3CertificateBuilder builder = new JcaX509v3CertificateBuilder(
+                    new X500Name("CN=rootCA-" + agentName), // issuer authority
+                    BigInteger.valueOf(new Random().nextInt()), //serial number of certificate
+                    DateTime.now().toDate(), // start of validity
+                    new DateTime().plusYears(3).toDate(),
+                    //new DateTime(2025, 12, 31, 0, 0, 0, 0).toDate(), //end of certificate validity
+                    new X500Name("CN=rootCA-" + agentName), // subject name of certificate
+                    rootCAKeyPair.getPublic()); // public key of certificate
+            // key usage restrictions
+            builder.addExtension(Extension.keyUsage, true, new KeyUsage(KeyUsage.keyCertSign));
+            builder.addExtension(Extension.basicConstraints, false, new BasicConstraints(true));
+            X509Certificate rootCA = new JcaX509CertificateConverter().getCertificate(builder
+                    .build(new JcaContentSignerBuilder("SHA256withRSA").setProvider("BC").
+                            build(rootCAKeyPair.getPrivate()))); // private key of signing authority , here it is self signed
+
+            X509Certificate[] chain = new X509Certificate[1];
+            chain[0]=rootCA;
+            //
+
+            ks.setKeyEntry("wsapi", rootCAKeyPair.getPrivate(), password, chain);
+
+            // Store away the keystore.
+            FileOutputStream fos = new FileOutputStream(kyStorePath.toString());
+            ks.store(fos, password);
+            fos.close();
+
+        } catch (Exception ex) {
+            ex.printStackTrace();
+        }
+
+    }
+
     private void generateCertChainKeyStore(Path kyStorePath) {
 
         try {
@@ -267,30 +325,42 @@ public class Plugin implements PluginService {
 
             // Create self signed Root CA certificate
 
-            String agentName = "wsapi-" + UUID.randomUUID().toString();
+            String agentName = "wsapi-" + UUID.randomUUID();
 
-            KeyPair rootCAKeyPair = generateKeyPair();
+            // yesterday
+            //Date validityBeginDate = new Date(System.currentTimeMillis() - 24 * 60 * 60 * 1000);
+            // in 2 years
+            //Date validityEndDate = new Date(System.currentTimeMillis() + 25 * 365 * 24 * 60 * 60 * 1000);
+
+            DateTime validityBeginDate = DateTime.now().minusDays(1);
+            DateTime validityEndDate = validityBeginDate.plusYears(5);
 
 
-            X509v3CertificateBuilder builder = new JcaX509v3CertificateBuilder(
-                    new X500Name("CN=rootCA-" + agentName), // issuer authority
-                    BigInteger.valueOf(new Random().nextInt()), //serial number of certificate
-                    DateTime.now().toDate(), // start of validity
-                    new DateTime().plusYears(3).toDate(),
-                    //new DateTime(2025, 12, 31, 0, 0, 0, 0).toDate(), //end of certificate validity
-                    new X500Name("CN=rootCA-" + agentName), // subject name of certificate
-                    rootCAKeyPair.getPublic()); // public key of certificate
-            // key usage restrictions
-            builder.addExtension(Extension.keyUsage, true, new KeyUsage(KeyUsage.keyCertSign));
-            builder.addExtension(Extension.basicConstraints, false, new BasicConstraints(true));
-            X509Certificate rootCA = new JcaX509CertificateConverter().getCertificate(builder
-                    .build(new JcaContentSignerBuilder("SHA256withRSA").setProvider("BC").
-                            build(rootCAKeyPair.getPrivate()))); // private key of signing authority , here it is self signed
+
+            // GENERATE THE PUBLIC/PRIVATE RSA KEY PAIR
+            KeyPairGenerator keyPairGenerator = KeyPairGenerator.getInstance("RSA", "BC");
+            keyPairGenerator.initialize(1024, new SecureRandom());
+
+            java.security.KeyPair keyPair = keyPairGenerator.generateKeyPair();
+
+            // GENERATE THE X509 CERTIFICATE
+            X509V1CertificateGenerator certGen = new X509V1CertificateGenerator();
+            X500Principal dnName = new X500Principal("CN=rootCA-" + agentName);
+
+            certGen.setSerialNumber(BigInteger.valueOf(System.currentTimeMillis()));
+            certGen.setSubjectDN(dnName);
+            certGen.setIssuerDN(dnName); // use the same
+            certGen.setNotBefore(validityBeginDate.toDate());
+            certGen.setNotAfter(validityEndDate.toDate());
+            certGen.setPublicKey(keyPair.getPublic());
+            certGen.setSignatureAlgorithm("SHA256WithRSAEncryption");
+
+            X509Certificate cert = certGen.generate(keyPair.getPrivate(), "BC");
 
             X509Certificate[] chain = new X509Certificate[1];
-            chain[0]=rootCA;
+            chain[0]=cert;
 
-            ks.setKeyEntry("wsapi", rootCAKeyPair.getPrivate(), password, chain);
+            ks.setKeyEntry("wsapi", keyPair.getPrivate(), password, chain);
 
             // Store away the keystore.
             FileOutputStream fos = new FileOutputStream(kyStorePath.toString());
