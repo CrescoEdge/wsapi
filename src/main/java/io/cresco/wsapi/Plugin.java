@@ -277,9 +277,7 @@ public class Plugin implements PluginService {
 
             DateTime validityBeginDate = DateTime.now().minusDays(1);
             DateTime validityEndDate = validityBeginDate.plusYears(5);
-
-
-
+            
             // GENERATE THE PUBLIC/PRIVATE RSA KEY PAIR
             KeyPairGenerator keyPairGenerator = KeyPairGenerator.getInstance("RSA", "BC");
             keyPairGenerator.initialize(1024, new SecureRandom());
