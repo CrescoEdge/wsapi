@@ -44,6 +44,8 @@ public class PluginExecutor implements Executor {
 
             case "repolist":
                 return repoList(ce);
+            case "globalinfo":
+                return getGlobalInfo(ce);
 
             default:
                 logger.error("Unknown configtype found {} for {}:", ce.getParam("action"), ce.getMsgType().toString());
@@ -60,6 +62,16 @@ public class PluginExecutor implements Executor {
     @Override
     public MsgEvent executeKPI(MsgEvent incoming) {
         return null;
+    }
+
+
+    private MsgEvent getGlobalInfo(MsgEvent msg) {
+
+        //msg.setCompressedParam("repolist",gson.toJson(repoMap));
+        msg.setParam("global_region", plugin.getAgentService().getAgentState().getGlobalRegion());
+        msg.setParam("global_agent", plugin.getAgentService().getAgentState().getGlobalAgent());
+        return msg;
+
     }
 
     private MsgEvent repoList(MsgEvent msg) {
