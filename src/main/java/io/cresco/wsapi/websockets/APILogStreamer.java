@@ -147,7 +147,7 @@ public class APILogStreamer
                         if(resp.paramsContains("status_code")) {
                             respMessage = "could not set loglevel status_code: " + resp.getParam("status_code") + " status_desc: " + resp.getParam("status_desc");
                         } else {
-                            respMessage = "could not set loglevel status_code: " + resp.getParam("status_code");
+                            respMessage = "could not set loglevel status_code unknown/missing";
                         }
                     }
                 }
