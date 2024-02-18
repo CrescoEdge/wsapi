@@ -165,7 +165,8 @@ public class APIDataPlane
     public void processUpload(byte[] b, boolean last, Session sess) {
 
         if(!last) {
-            System.out.println("processUpload(byte[] b, boolean last, Session sess) NOT LAST MESSAGE!!!!");
+            logger.error("processUpload(byte[] b, boolean last, Session sess) PARTIAL NOT IMPLEMENTED !!!!");
+            logger.error("byte len: " + b.length + " last: " + last);
         }
 
         if(isActive(sess)) {

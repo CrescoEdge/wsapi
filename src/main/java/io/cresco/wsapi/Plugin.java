@@ -160,7 +160,7 @@ public class Plugin implements PluginService {
                 Server server = new Server();
                 HttpConfiguration https = new HttpConfiguration();
                 https.addCustomizer(new SecureRequestCustomizer());
-                
+
                 SslContextFactory sslContextFactory = new SslContextFactory.Server();
 
                 Path kyStorePath = Paths.get(pluginBuilder.getPluginDataDirectory() + File.separator + "ws.keystore");
