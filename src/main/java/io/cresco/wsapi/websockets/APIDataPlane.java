@@ -3,17 +3,18 @@ package io.cresco.wsapi.websockets;
 import com.google.common.reflect.TypeToken;
 import com.google.gson.Gson;
 import io.cresco.library.data.TopicType;
-import io.cresco.library.messaging.MsgEvent;
 import io.cresco.library.plugin.PluginBuilder;
 import io.cresco.library.utilities.CLogger;
 import io.cresco.wsapi.Plugin;
 
 import javax.jms.Message;
-import javax.jms.StreamMessage;
 import javax.jms.TextMessage;
+import javax.jms.BytesMessage;
+
 import javax.websocket.*;
 import javax.websocket.server.ServerEndpoint;
 import java.lang.reflect.Type;
+import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -79,7 +80,6 @@ public class APIDataPlane
     @OnMessage
     public void onWebSocketText(Session sess, String message)
     {
-
         if(isActive(sess)) {
 
             try {
@@ -155,7 +155,48 @@ public class APIDataPlane
 
         }
 
+    }
 
+    @OnMessage
+    public void processUpload(byte[] b, boolean last, Session sess) {
+
+        if(!last) {
+            System.out.println("processUpload(byte[] b, boolean last, Session sess) NOT LAST MESSAGE!!!!");
+        }
+
+        if(isActive(sess)) {
+
+            try {
+
+                String identKey;
+                String identId;
+                String ioTypeKey;
+                String inputId;
+
+                synchronized (lockSessionMap) {
+                    identKey = sessionMap.get(sess.getId()).getIdentKey();
+                    identId = sessionMap.get(sess.getId()).getIdentId();
+                    ioTypeKey = sessionMap.get(sess.getId()).getIoTypeKey();
+                    inputId = sessionMap.get(sess.getId()).getInputId();
+                }
+
+                if((identKey != null) && (identId != null)) {
+
+                    BytesMessage updateMessage = plugin.getAgentService().getDataPlaneService().createBytesMessage();
+                    updateMessage.writeBytes(b);
+                    updateMessage.setStringProperty(identKey, identId);
+                    updateMessage.setStringProperty(ioTypeKey, inputId);
+
+                    plugin.getAgentService().getDataPlaneService().sendMessage(TopicType.AGENT, updateMessage);
+
+                } else {
+                    logger.error("identKey and identId are null for session_id: " + sess.getId());
+                }
+            } catch (Exception ex) {
+                logger.error("processUpload: " + ex.getMessage());
+            }
+
+        }
 
     }
 
@@ -167,12 +208,17 @@ public class APIDataPlane
                 public void onMessage(Message msg) {
                     try {
 
-
                         if (msg instanceof TextMessage) {
-
                             sess.getAsyncRemote().sendObject(((TextMessage) msg).getText());
 
+                        } else if (msg instanceof BytesMessage) {
+                            long dataSize = ((BytesMessage) msg).getBodyLength();
+                            byte[] bytes = new byte[(int)dataSize];
+                            ((BytesMessage) msg).readBytes(bytes);
+                            ByteBuffer buffer = ByteBuffer.wrap(bytes);
+                            sess.getAsyncRemote().sendBinary(buffer);
                         }
+
                     } catch(Exception ex) {
 
                         ex.printStackTrace();

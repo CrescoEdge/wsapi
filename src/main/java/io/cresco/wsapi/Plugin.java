@@ -223,7 +223,6 @@ public class Plugin implements PluginService {
                 container.addEndpoint(APIDataPlane.class);
                 container.addEndpoint(APILogStreamer.class);
 
-
                 server.start();
                 logger.info("Started server: " + server);
                 if (server.getConnectors().length > 0) {

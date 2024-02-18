@@ -52,6 +52,7 @@ public class APISocket
 
     @OnMessage
     public void onWebSocketText(Session sess, String message) {
+
         String r;
 
         Map<String, Map<String, String>> incoming_message = gson.fromJson(message, type);
