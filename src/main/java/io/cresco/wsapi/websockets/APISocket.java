@@ -40,8 +40,8 @@ public class APISocket
     @OnOpen
     public void onWebSocketConnect(Session sess)
     {
-        sess.setMaxBinaryMessageBufferSize(50000000);
-        sess.setMaxTextMessageBufferSize(50000000);
+        sess.setMaxBinaryMessageBufferSize(1024 * 1024 * 1024);
+        sess.setMaxTextMessageBufferSize(1024 * 1024 * 1024);
         sessions.add(sess);
         String logSessionId = UUID.randomUUID().toString();
         sessionMap.put(sess.getId(),logSessionId);

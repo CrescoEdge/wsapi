@@ -6,6 +6,8 @@ import io.cresco.library.data.TopicType;
 import io.cresco.library.plugin.PluginBuilder;
 import io.cresco.library.utilities.CLogger;
 import io.cresco.wsapi.Plugin;
+import org.eclipse.jetty.websocket.api.WebSocketBehavior;
+import org.eclipse.jetty.websocket.api.WebSocketPolicy;
 
 import javax.jms.Message;
 import javax.jms.TextMessage;
@@ -49,8 +51,10 @@ public class APIDataPlane
     @OnOpen
     public void onWebSocketConnect(Session sess)
     {
-        sess.setMaxBinaryMessageBufferSize(50000000);
-        sess.setMaxTextMessageBufferSize(50000000);
+
+        sess.setMaxBinaryMessageBufferSize(1024 * 1024 * 1024);
+        sess.setMaxTextMessageBufferSize(1024 * 1024 * 1024);
+
         synchronized (lockSessions) {
             sessions.add(sess);
         }

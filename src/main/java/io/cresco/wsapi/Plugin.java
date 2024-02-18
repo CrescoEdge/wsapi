@@ -24,6 +24,8 @@ import org.eclipse.jetty.server.*;
 import org.eclipse.jetty.servlet.FilterHolder;
 import org.eclipse.jetty.servlet.ServletContextHandler;
 import org.eclipse.jetty.util.ssl.SslContextFactory;
+import org.eclipse.jetty.websocket.api.WebSocketBehavior;
+import org.eclipse.jetty.websocket.api.WebSocketPolicy;
 import org.eclipse.jetty.websocket.jsr356.server.ServerContainer;
 import org.eclipse.jetty.websocket.jsr356.server.deploy.WebSocketServerContainerInitializer;
 import org.joda.time.DateTime;
@@ -158,8 +160,7 @@ public class Plugin implements PluginService {
                 Server server = new Server();
                 HttpConfiguration https = new HttpConfiguration();
                 https.addCustomizer(new SecureRequestCustomizer());
-
-
+                
                 SslContextFactory sslContextFactory = new SslContextFactory.Server();
 
                 Path kyStorePath = Paths.get(pluginBuilder.getPluginDataDirectory() + File.separator + "ws.keystore");
