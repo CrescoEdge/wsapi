@@ -6,8 +6,6 @@ import io.cresco.library.data.TopicType;
 import io.cresco.library.plugin.PluginBuilder;
 import io.cresco.library.utilities.CLogger;
 import io.cresco.wsapi.Plugin;
-import org.eclipse.jetty.websocket.api.WebSocketBehavior;
-import org.eclipse.jetty.websocket.api.WebSocketPolicy;
 
 import javax.jms.Message;
 import javax.jms.TextMessage;
@@ -164,6 +162,7 @@ public class APIDataPlane
     @OnMessage
     public void processUpload(byte[] b, boolean last, Session sess) {
 
+        logger.error("WOOO HERE IT COMES");
         if(!last) {
             logger.error("processUpload(byte[] b, boolean last, Session sess) PARTIAL NOT IMPLEMENTED !!!!");
             logger.error("byte len: " + b.length + " last: " + last);
@@ -217,6 +216,7 @@ public class APIDataPlane
                             sess.getAsyncRemote().sendObject(((TextMessage) msg).getText());
 
                         } else if (msg instanceof BytesMessage) {
+                            //logger.error("HERE COME SOMETHING BYTE!!! ");
                             long dataSize = ((BytesMessage) msg).getBodyLength();
                             byte[] bytes = new byte[(int)dataSize];
                             ((BytesMessage) msg).readBytes(bytes);
@@ -237,7 +237,9 @@ public class APIDataPlane
             if(streamInfo.getStream_query() != null) {
                 stream_query = streamInfo.getStream_query();
             } else {
-                stream_query = streamInfo.getIdentKey() + "='" + streamInfo.getIdentId() + "' and " + streamInfo.getIoTypeKey() + "='" + streamInfo.getOutputId() + "'";
+                //stream_query = streamInfo.getIdentKey() + "='" + streamInfo.getIdentId() + "' and " + streamInfo.getIoTypeKey() + "='" + streamInfo.getOutputId() + "'";
+                stream_query = streamInfo.getIdentKey() + "='" + streamInfo.getIdentId() + "'";
+
             }
             String listenerid = plugin.getAgentService().getDataPlaneService().addMessageListener(TopicType.AGENT,ml,stream_query);
 
