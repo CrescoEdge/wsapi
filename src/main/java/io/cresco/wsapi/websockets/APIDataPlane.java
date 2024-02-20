@@ -1,5 +1,6 @@
 package io.cresco.wsapi.websockets;
 
+import com.google.common.primitives.Bytes;
 import com.google.common.reflect.TypeToken;
 import com.google.gson.Gson;
 import io.cresco.library.data.TopicType;
@@ -217,9 +218,13 @@ public class APIDataPlane
 
                         } else if (msg instanceof BytesMessage) {
                             //logger.error("HERE COME SOMETHING BYTE!!! ");
+                            String transferId = msg.getStringProperty("transfer_id");
                             long dataSize = ((BytesMessage) msg).getBodyLength();
                             byte[] bytes = new byte[(int)dataSize];
                             ((BytesMessage) msg).readBytes(bytes);
+                            if(transferId != null) {
+                                bytes = Bytes.concat(transferId.getBytes(), bytes);
+                            }
                             ByteBuffer buffer = ByteBuffer.wrap(bytes);
                             sess.getAsyncRemote().sendBinary(buffer);
                         }
