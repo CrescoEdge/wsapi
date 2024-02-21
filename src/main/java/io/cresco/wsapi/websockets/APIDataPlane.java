@@ -217,7 +217,6 @@ public class APIDataPlane
                             sess.getAsyncRemote().sendObject(((TextMessage) msg).getText());
 
                         } else if (msg instanceof BytesMessage) {
-                            //logger.error("HERE COME SOMETHING BYTE!!! ");
                             String transferId = msg.getStringProperty("transfer_id");
                             long dataSize = ((BytesMessage) msg).getBodyLength();
                             byte[] bytes = new byte[(int)dataSize];

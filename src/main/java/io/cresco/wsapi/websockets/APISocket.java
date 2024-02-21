@@ -53,6 +53,7 @@ public class APISocket
     @OnMessage
     public void onWebSocketText(Session sess, String message) {
 
+        logger.error("HELP ME : " + message);
         String r;
 
         Map<String, Map<String, String>> incoming_message = gson.fromJson(message, type);
