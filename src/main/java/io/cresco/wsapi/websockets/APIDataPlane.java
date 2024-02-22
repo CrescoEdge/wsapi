@@ -252,6 +252,7 @@ public class APIDataPlane
             synchronized (lockSessionMap) {
                 sessionMap.put(sess.getId(), streamInfo);
             }
+            //System.out.println("createListner() sessionId: " + sess.getId() + " listenerid: " + listenerid);
 
             //sess.getAsyncRemote().sendObject("APIDataPlane Connected Session: " + sess.getId());
 
@@ -271,8 +272,11 @@ public class APIDataPlane
         //System.out.println("Socket Closed: " + reason);
         String listenerid = null;
         synchronized (lockSessionMap) {
-            listenerid = sessionMap.get(sess.getId()).getSessionId();
+            listenerid = sessionMap.get(sess.getId()).getListenerId();
+
         }
+        System.out.println("closeListner() sessionId: " + sess.getId() + " listenerid: " + listenerid);
+
         //so we don't get messages about disabling logger
         if (listenerid != null) {
             Plugin.pluginBuilder.getAgentService().getDataPlaneService().removeMessageListener(listenerid);

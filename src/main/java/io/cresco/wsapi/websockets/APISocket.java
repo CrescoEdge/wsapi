@@ -53,7 +53,6 @@ public class APISocket
     @OnMessage
     public void onWebSocketText(Session sess, String message) {
 
-        logger.error("HELP ME : " + message);
         String r;
 
         Map<String, Map<String, String>> incoming_message = gson.fromJson(message, type);
@@ -254,7 +253,7 @@ public class APISocket
     @OnClose
     public void onWebSocketClose(Session sess, CloseReason reason)
     {
-        logger.info("Socket Closed: " + reason);
+        logger.debug("Socket Closed: " + reason);
         //System.out.println("Socket Closed: " + reason);
 
         if(activeHost.containsKey(sess.getId())) {

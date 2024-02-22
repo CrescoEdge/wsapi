@@ -185,6 +185,8 @@ public class Plugin implements PluginService {
                 sslContextFactory.setKeyStorePath(kyStorePath.toString());
                 sslContextFactory.setKeyStorePassword("cresco");
                 sslContextFactory.setKeyManagerPassword("cresco");
+                //sslContextFactory.setIncludeProtocols("TLSv1.2", "TLSv1.3");
+                sslContextFactory.setIncludeProtocols("TLSv1.2");
                 ServerConnector sslConnector = new ServerConnector(server,
                         new SslConnectionFactory(sslContextFactory, HttpVersion.HTTP_1_1.asString()),
                         new HttpConnectionFactory(https));
