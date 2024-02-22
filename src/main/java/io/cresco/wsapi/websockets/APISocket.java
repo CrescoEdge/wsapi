@@ -264,6 +264,7 @@ public class APISocket
         sessions.remove(sess);
     }
 
+    
     @OnError
     public void onWebSocketError(Throwable cause)
     {
