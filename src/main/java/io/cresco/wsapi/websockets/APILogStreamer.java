@@ -45,7 +45,7 @@ public class APILogStreamer
         String logSessionId = UUID.randomUUID().toString();
         sessionMap.put(sess.getId(),logSessionId);
         //System.out.println("Socket Connected: " + sess);
-        logger.info("Socket Connected: " + sess.getId());
+        logger.debug("Socket Connected: " + sess.getId());
 
         Map<String, String> responce = new HashMap<>();
 
@@ -80,7 +80,7 @@ public class APILogStreamer
 
                 public void onMessage(Message msg) {
                     try {
-
+                        System.out.println("onMessage(Message msg) log");
                         if (msg instanceof TextMessage) {
 
                             TextMessage textMessage = (TextMessage)msg;

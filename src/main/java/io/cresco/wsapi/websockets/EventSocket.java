@@ -23,7 +23,7 @@ public class EventSocket
     public void onWebSocketConnect(Session sess)
     {
         sessions.add(sess);
-        System.out.println("Socket Connected: " + sess);
+        //System.out.println("Socket Connected: " + sess);
 
         MessageListener ml = new MessageListener() {
 

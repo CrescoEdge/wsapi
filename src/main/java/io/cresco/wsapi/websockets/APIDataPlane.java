@@ -1,5 +1,6 @@
 package io.cresco.wsapi.websockets;
 
+
 import com.google.common.primitives.Bytes;
 import com.google.common.reflect.TypeToken;
 import com.google.gson.Gson;
@@ -18,6 +19,8 @@ import java.lang.reflect.Type;
 import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+
+
 
 @ClientEndpoint
 @ServerEndpoint(value="/api/dataplane")
@@ -212,12 +215,15 @@ public class APIDataPlane
             javax.jms.MessageListener ml = new javax.jms.MessageListener() {
                 public void onMessage(Message msg) {
                     try {
-
+                        //System.out.println("onMessage(Message msg)  dataplane");
+                        //logger.error("WHY ME");
                         if (msg instanceof TextMessage) {
                             sess.getAsyncRemote().sendObject(((TextMessage) msg).getText());
+                            //System.out.println("onMessage(Message msg) " + msg);
 
                         } else if (msg instanceof BytesMessage) {
                             String transferId = msg.getStringProperty("transfer_id");
+                            //System.out.println("onMessage(Message msg) transferId: " + transferId);
                             long dataSize = ((BytesMessage) msg).getBodyLength();
                             byte[] bytes = new byte[(int)dataSize];
                             ((BytesMessage) msg).readBytes(bytes);
@@ -231,6 +237,7 @@ public class APIDataPlane
                     } catch(Exception ex) {
 
                         ex.printStackTrace();
+                        logger.error("error createListener: " + ex.getMessage());
                     }
                 }
             };

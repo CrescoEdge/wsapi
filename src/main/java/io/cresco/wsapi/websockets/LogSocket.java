@@ -42,13 +42,13 @@ public class LogSocket
         String logSessionId = UUID.randomUUID().toString();
         sessionMap.put(sess.getId(),logSessionId);
         //System.out.println("Socket Connected: " + sess);
-        logger.info("Socket Connected: " + sess.getId());
+        logger.debug("Socket Connected: " + sess.getId());
 
         MessageListener ml = new MessageListener() {
 
             public void onMessage(Message msg) {
                 try {
-
+                    System.out.println("onMessage(Message msg) log socket" );
                     if (msg instanceof TextMessage) {
 
                         TextMessage textMessage = (TextMessage)msg;

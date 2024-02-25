@@ -47,13 +47,13 @@ public class LogStreamerNew
         String region_id = pathparams.get("region");
         String agent_id = pathparams.get("agent");
 
-        logger.info("Socket Connected: " + sess + " region: " + region_id + " agent: " + agent_id);
+        logger.debug("Socket Connected: " + sess + " region: " + region_id + " agent: " + agent_id);
 
         MessageListener ml = new MessageListener() {
 
             public void onMessage(Message msg) {
                 try {
-
+                    System.out.println("onMessage(Message msg) log streamer");
                     if (msg instanceof TextMessage) {
 
                         TextMessage textMessage = (TextMessage)msg;

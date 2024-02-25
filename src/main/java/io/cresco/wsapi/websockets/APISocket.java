@@ -46,7 +46,7 @@ public class APISocket
         String logSessionId = UUID.randomUUID().toString();
         sessionMap.put(sess.getId(),logSessionId);
         //System.out.println("Socket Connected: " + sess);
-        logger.info("Socket Connected: " + sess.getId());
+        logger.debug("Socket Connected: " + sess.getId());
 
     }
 
@@ -264,7 +264,7 @@ public class APISocket
         sessions.remove(sess);
     }
 
-    
+
     @OnError
     public void onWebSocketError(Throwable cause)
     {
