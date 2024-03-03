@@ -223,6 +223,7 @@ public class APIDataPlane
 
                         } else if (msg instanceof BytesMessage) {
                             String transferId = msg.getStringProperty("transfer_id");
+                            //logger.error("INCOMING TRANSFER ID: " + transferId);
                             //System.out.println("onMessage(Message msg) transferId: " + transferId);
                             long dataSize = ((BytesMessage) msg).getBodyLength();
                             byte[] bytes = new byte[(int)dataSize];
