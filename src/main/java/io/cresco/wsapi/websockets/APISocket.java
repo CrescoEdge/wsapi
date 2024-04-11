@@ -40,6 +40,7 @@ public class APISocket
     @OnOpen
     public void onWebSocketConnect(Session sess)
     {
+        sess.setMaxIdleTimeout(0);
         sess.setMaxBinaryMessageBufferSize(1024 * 1024 * 1024);
         sess.setMaxTextMessageBufferSize(1024 * 1024 * 1024);
         sessions.add(sess);

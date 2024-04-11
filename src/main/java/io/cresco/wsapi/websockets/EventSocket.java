@@ -22,6 +22,7 @@ public class EventSocket
     @OnOpen
     public void onWebSocketConnect(Session sess)
     {
+        sess.setMaxIdleTimeout(0);
         sessions.add(sess);
         //System.out.println("Socket Connected: " + sess);
 

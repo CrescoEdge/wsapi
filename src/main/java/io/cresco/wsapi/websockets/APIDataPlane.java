@@ -53,7 +53,7 @@ public class APIDataPlane
     @OnOpen
     public void onWebSocketConnect(Session sess)
     {
-
+        sess.setMaxIdleTimeout(0);
         sess.setMaxBinaryMessageBufferSize(1024 * 1024 * 1024);
         sess.setMaxTextMessageBufferSize(1024 * 1024 * 1024);
 
@@ -223,11 +223,17 @@ public class APIDataPlane
 
                         } else if (msg instanceof BytesMessage) {
                             String transferId = msg.getStringProperty("transfer_id");
-                            //logger.error("INCOMING TRANSFER ID: " + transferId);
+
+
+                            String seqNum = String.format("%1$" + 6 + "s", msg.getStringProperty("seq_num")).replace(' ', '0');
+                            //logger.error("INCOMING TRANSFER ID: " + transferId + " seq: " + msg.getStringProperty("seq_num"));
                             //System.out.println("onMessage(Message msg) transferId: " + transferId);
                             long dataSize = ((BytesMessage) msg).getBodyLength();
                             byte[] bytes = new byte[(int)dataSize];
                             ((BytesMessage) msg).readBytes(bytes);
+                            if(msg.getStringProperty("seq_num") != null) {
+                                bytes = Bytes.concat(seqNum.getBytes(), bytes);
+                            }
                             if(transferId != null) {
                                 bytes = Bytes.concat(transferId.getBytes(), bytes);
                             }

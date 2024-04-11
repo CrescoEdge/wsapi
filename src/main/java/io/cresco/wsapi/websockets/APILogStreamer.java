@@ -41,6 +41,7 @@ public class APILogStreamer
     @OnOpen
     public void onWebSocketConnect(Session sess)
     {
+        sess.setMaxIdleTimeout(0);
         sessions.add(sess);
         String logSessionId = UUID.randomUUID().toString();
         sessionMap.put(sess.getId(),logSessionId);
