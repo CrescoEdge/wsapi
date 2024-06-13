@@ -3,9 +3,11 @@ package io.cresco.wsapi.websockets;
 import io.cresco.wsapi.Plugin;
 import io.cresco.library.data.TopicType;
 
-import javax.jms.Message;
-import javax.jms.MessageListener;
-import javax.jms.TextMessage;
+import jakarta.jms.Message;
+import jakarta.jms.MessageListener;
+import jakarta.jms.TextMessage;
+
+
 import javax.websocket.*;
 import javax.websocket.server.ServerEndpoint;
 import java.util.Collections;

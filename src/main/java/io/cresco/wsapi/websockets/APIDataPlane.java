@@ -8,12 +8,15 @@ import io.cresco.library.data.TopicType;
 import io.cresco.library.plugin.PluginBuilder;
 import io.cresco.library.utilities.CLogger;
 import io.cresco.wsapi.Plugin;
+import jakarta.jms.BytesMessage;
+import jakarta.jms.Message;
+import jakarta.jms.MessageListener;
+import jakarta.jms.TextMessage;
 
-import javax.jms.Message;
-import javax.jms.TextMessage;
-import javax.jms.BytesMessage;
 
 import javax.websocket.*;
+import javax.websocket.ClientEndpoint;
+import javax.websocket.OnOpen;
 import javax.websocket.server.ServerEndpoint;
 import java.lang.reflect.Type;
 import java.nio.ByteBuffer;
@@ -212,7 +215,7 @@ public class APIDataPlane
         boolean isCreated = false;
         try{
 
-            javax.jms.MessageListener ml = new javax.jms.MessageListener() {
+            MessageListener ml = new MessageListener() {
                 public void onMessage(Message msg) {
                     try {
                         //System.out.println("onMessage(Message msg)  dataplane");

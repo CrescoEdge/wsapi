@@ -6,7 +6,7 @@
 
     <groupId>io.cresco</groupId>
     <artifactId>wsapi</artifactId>
-    <version>1.1-SNAPSHOT</version>
+    <version>1.2-SNAPSHOT</version>
 
     <name>Cresco WSAPI</name>
     <description>Cresco framework websocket API</description>
@@ -40,12 +40,12 @@
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <jdk>1.8</jdk>
         <mojo.buildnumber.version>1.4</mojo.buildnumber.version>
-        <maven.compiler.version>3.8.1</maven.compiler.version>
-        <maven.bundle.compiler.version>4.2.1</maven.bundle.compiler.version>
         <jetty.version>9.4.53.v20231009</jetty.version>
-        <bouncycastle.version>1.66</bouncycastle.version>
+        <bouncycastle.version>1.78.1</bouncycastle.version>
+        <jdk>21</jdk>
+        <maven.compiler.version>3.13.0</maven.compiler.version>
+        <maven.bundle.compiler.version>5.1.9</maven.bundle.compiler.version>
     </properties>
 
     <dependencies>
@@ -104,28 +104,35 @@
         <!-- https://mvnrepository.com/artifact/org.bouncycastle/bcprov-jdk15on -->
         <dependency>
             <groupId>org.bouncycastle</groupId>
-            <artifactId>bcprov-jdk15on</artifactId>
+            <artifactId>bcprov-jdk18on</artifactId>
             <version>${bouncycastle.version}</version>
         </dependency>
 
         <!-- https://mvnrepository.com/artifact/org.bouncycastle/bcpkix-jdk15on -->
         <dependency>
             <groupId>org.bouncycastle</groupId>
-            <artifactId>bcpkix-jdk15on</artifactId>
+            <artifactId>bcpkix-jdk18on</artifactId>
             <version>${bouncycastle.version}</version>
         </dependency>
 
         <!-- https://mvnrepository.com/artifact/org.bouncycastle/bcmail-jdk15on -->
         <dependency>
             <groupId>org.bouncycastle</groupId>
-            <artifactId>bcmail-jdk15on</artifactId>
+            <artifactId>bcmail-jdk18on</artifactId>
+            <version>${bouncycastle.version}</version>
+        </dependency>
+
+        <!-- https://mvnrepository.com/artifact/org.bouncycastle/bcmail-jdk15on -->
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcutil-jdk18on</artifactId>
             <version>${bouncycastle.version}</version>
         </dependency>
 
         <dependency>
             <groupId>io.cresco</groupId>
             <artifactId>library</artifactId>
-            <version>1.1-SNAPSHOT</version>
+            <version>1.2-SNAPSHOT</version>
             <scope>provided</scope>
         </dependency>
 
