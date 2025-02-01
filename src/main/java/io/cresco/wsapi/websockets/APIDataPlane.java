@@ -111,7 +111,7 @@ public class APIDataPlane
                     updateMessage.setStringProperty(identKey, identId);
                     updateMessage.setStringProperty(ioTypeKey, inputId);
 
-                    plugin.getAgentService().getDataPlaneService().sendMessage(TopicType.AGENT, updateMessage);
+                    plugin.getAgentService().getDataPlaneService().sendMessage(TopicType.GLOBAL, updateMessage);
                 } else {
                     logger.error("identKey and identId are null for session_id: " + sess.getId());
                 }
@@ -198,7 +198,7 @@ public class APIDataPlane
                     updateMessage.setStringProperty(identKey, identId);
                     updateMessage.setStringProperty(ioTypeKey, inputId);
 
-                    plugin.getAgentService().getDataPlaneService().sendMessage(TopicType.AGENT, updateMessage);
+                    plugin.getAgentService().getDataPlaneService().sendMessage(TopicType.GLOBAL, updateMessage);
 
                 } else {
                     logger.error("identKey and identId are null for session_id: " + sess.getId());
@@ -262,7 +262,9 @@ public class APIDataPlane
                 stream_query = streamInfo.getIdentKey() + "='" + streamInfo.getIdentId() + "'";
 
             }
-            String listenerid = plugin.getAgentService().getDataPlaneService().addMessageListener(TopicType.AGENT,ml,stream_query);
+            //logger.info("stream_query: " + stream_query);
+
+            String listenerid = plugin.getAgentService().getDataPlaneService().addMessageListener(TopicType.GLOBAL,ml,stream_query);
 
             streamInfo.setListenerId(listenerid);
 
