@@ -169,7 +169,6 @@ public class APIDataPlane
     @OnMessage
     public void processUpload(byte[] b, boolean last, Session sess) {
 
-        logger.error("WOOO HERE IT COMES");
         if(!last) {
             logger.error("processUpload(byte[] b, boolean last, Session sess) PARTIAL NOT IMPLEMENTED !!!!");
             logger.error("byte len: " + b.length + " last: " + last);
