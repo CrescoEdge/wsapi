@@ -140,7 +140,11 @@ public class APISocket
         try {
 
             MsgEvent.Type messageEventType = MsgEvent.Type.valueOf(messageInfo.get("message_event_type"));
-            request = plugin.getGlobalControllerMsgEvent(messageEventType);
+            if((messageInfo.containsKey("region_id")) && (messageInfo.containsKey("agent_id"))) {
+                request = plugin.getGlobalControllerMsgEvent(messageEventType, messageInfo.get("region_id"), messageInfo.get("agent_id"));
+            } else {
+                request = plugin.getGlobalControllerMsgEvent(messageEventType);
+            }
 
         } catch (Exception ex) {
             logger.error(ex.getMessage());
@@ -193,7 +197,13 @@ public class APISocket
         MsgEvent request = null;
         try {
             MsgEvent.Type messageEventType = MsgEvent.Type.valueOf(messageInfo.get("message_event_type"));
-            request = plugin.getRegionalControllerMsgEvent(messageEventType);
+
+            if((messageInfo.containsKey("region_id")) && (messageInfo.containsKey("agent_id"))) {
+                request = plugin.getRegionalControllerMsgEvent(messageEventType, messageInfo.get("region_id"), messageInfo.get("agent_id"));
+            } else {
+                request = plugin.getRegionalControllerMsgEvent(messageEventType);
+            }
+
         } catch (Exception ex) {
             logger.error(ex.getMessage());
         }
