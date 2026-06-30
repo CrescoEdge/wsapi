@@ -4,9 +4,14 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>io.cresco</groupId>
+    <parent>
+        <groupId>io.cresco</groupId>
+        <artifactId>cresco-parent</artifactId>
+        <version>1.2-SNAPSHOT</version>
+        <relativePath/>
+    </parent>
+
     <artifactId>wsapi</artifactId>
-    <version>1.2-SNAPSHOT</version>
 
     <name>Cresco WSAPI</name>
     <description>Cresco framework websocket API</description>
@@ -31,7 +36,6 @@
         </repository>
     </distributionManagement>
 
-
     <scm>
         <connection>scm:git:git://github.com/CrescoEdge/wsapi.git</connection>
         <developerConnection>scm:git:git://github.com/CrescoEdge/wsapi.git</developerConnection>
@@ -39,59 +43,43 @@
     </scm>
 
     <properties>
-        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <mojo.buildnumber.version>1.4</mojo.buildnumber.version>
+        <!-- jdk, encoding, plugin & OSGi API / gson versions inherited from cresco-parent -->
+        <!-- NOTE (Phase 3/4): Jetty 9.4 is EOL; target is Felix HTTP Whiteboard or Jetty 12 + jakarta.websocket. -->
         <jetty.version>9.4.57.v20241219</jetty.version>
         <bouncycastle.version>1.78.1</bouncycastle.version>
-        <jdk>21</jdk>
-        <maven.compiler.version>3.13.0</maven.compiler.version>
-        <maven.bundle.compiler.version>5.1.9</maven.bundle.compiler.version>
     </properties>
 
     <dependencies>
 
+        <!-- OSGi API versions managed by cresco-parent; build-time only -> provided -->
         <dependency>
             <groupId>org.osgi</groupId>
             <artifactId>org.osgi.core</artifactId>
-            <version>6.0.0</version>
             <scope>provided</scope>
         </dependency>
-
-        <!-- https://mvnrepository.com/artifact/org.osgi/osgi.cmpn -->
         <dependency>
             <groupId>org.osgi</groupId>
             <artifactId>osgi.cmpn</artifactId>
-            <version>6.0.0</version>
             <scope>provided</scope>
         </dependency>
-
         <dependency>
             <groupId>org.osgi</groupId>
             <artifactId>osgi.annotation</artifactId>
-            <version>6.0.1</version>
+            <scope>provided</scope>
         </dependency>
-
-        <!-- https://mvnrepository.com/artifact/org.osgi/org.osgi.service.component.annotations -->
         <dependency>
             <groupId>org.osgi</groupId>
             <artifactId>org.osgi.service.component.annotations</artifactId>
-            <version>1.4.0</version>
             <scope>provided</scope>
         </dependency>
-
-        <!-- https://mvnrepository.com/artifact/org.osgi/org.osgi.service.metatype.annotations -->
         <dependency>
             <groupId>org.osgi</groupId>
             <artifactId>org.osgi.service.metatype.annotations</artifactId>
-            <version>1.4.0</version>
             <scope>provided</scope>
         </dependency>
-
-        <!-- https://mvnrepository.com/artifact/org.osgi/org.osgi.service.cm -->
         <dependency>
             <groupId>org.osgi</groupId>
             <artifactId>org.osgi.service.cm</artifactId>
-            <version>1.6.0</version>
             <scope>provided</scope>
         </dependency>
 
@@ -101,28 +89,21 @@
             <version>2.10.3</version>
         </dependency>
 
-        <!-- https://mvnrepository.com/artifact/org.bouncycastle/bcprov-jdk15on -->
         <dependency>
             <groupId>org.bouncycastle</groupId>
             <artifactId>bcprov-jdk18on</artifactId>
             <version>${bouncycastle.version}</version>
         </dependency>
-
-        <!-- https://mvnrepository.com/artifact/org.bouncycastle/bcpkix-jdk15on -->
         <dependency>
             <groupId>org.bouncycastle</groupId>
             <artifactId>bcpkix-jdk18on</artifactId>
             <version>${bouncycastle.version}</version>
         </dependency>
-
-        <!-- https://mvnrepository.com/artifact/org.bouncycastle/bcmail-jdk15on -->
         <dependency>
             <groupId>org.bouncycastle</groupId>
             <artifactId>bcmail-jdk18on</artifactId>
             <version>${bouncycastle.version}</version>
         </dependency>
-
-        <!-- https://mvnrepository.com/artifact/org.bouncycastle/bcmail-jdk15on -->
         <dependency>
             <groupId>org.bouncycastle</groupId>
             <artifactId>bcutil-jdk18on</artifactId>
@@ -145,56 +126,39 @@
         <dependency>
             <groupId>com.google.code.gson</groupId>
             <artifactId>gson</artifactId>
-            <version>2.8.9</version>
         </dependency>
 
-
         <!-- Start JETTY IMPORTS -->
-
-        <!-- https://mvnrepository.com/artifact/org.eclipse.jetty/jetty-server -->
         <dependency>
             <groupId>org.eclipse.jetty</groupId>
             <artifactId>jetty-server</artifactId>
             <version>${jetty.version}</version>
         </dependency>
-
-        <!-- https://mvnrepository.com/artifact/org.eclipse.jetty/jetty-servlet -->
         <dependency>
             <groupId>org.eclipse.jetty</groupId>
             <artifactId>jetty-servlet</artifactId>
             <version>${jetty.version}</version>
         </dependency>
-
-        <!-- https://mvnrepository.com/artifact/org.eclipse.jetty/jetty-servlets -->
         <dependency>
             <groupId>org.eclipse.jetty</groupId>
             <artifactId>jetty-servlets</artifactId>
             <version>${jetty.version}</version>
         </dependency>
-
-
-        <!-- https://mvnrepository.com/artifact/org.eclipse.jetty/jetty-util -->
         <dependency>
             <groupId>org.eclipse.jetty</groupId>
             <artifactId>jetty-util</artifactId>
             <version>${jetty.version}</version>
         </dependency>
-
-        <!-- https://mvnrepository.com/artifact/org.eclipse.jetty/jetty-http -->
         <dependency>
             <groupId>org.eclipse.jetty</groupId>
             <artifactId>jetty-http</artifactId>
             <version>${jetty.version}</version>
         </dependency>
-
-        <!-- https://mvnrepository.com/artifact/org.eclipse.jetty/jetty-security -->
         <dependency>
             <groupId>org.eclipse.jetty</groupId>
             <artifactId>jetty-security</artifactId>
             <version>${jetty.version}</version>
         </dependency>
-
-        <!-- https://mvnrepository.com/artifact/org.eclipse.jetty/jetty-io -->
         <dependency>
             <groupId>org.eclipse.jetty</groupId>
             <artifactId>jetty-io</artifactId>
@@ -202,62 +166,51 @@
         </dependency>
 
         <!-- Start JETTY WEBSOCKET IMPORTS -->
-
         <dependency>
             <groupId>org.eclipse.jetty.websocket</groupId>
             <artifactId>websocket-servlet</artifactId>
             <version>${jetty.version}</version>
         </dependency>
-
         <dependency>
             <groupId>org.eclipse.jetty.websocket</groupId>
             <artifactId>websocket-api</artifactId>
             <version>${jetty.version}</version>
         </dependency>
-
         <dependency>
             <groupId>org.eclipse.jetty.websocket</groupId>
             <artifactId>websocket-server</artifactId>
             <version>${jetty.version}</version>
         </dependency>
-
         <dependency>
             <groupId>org.eclipse.jetty.websocket</groupId>
             <artifactId>javax-websocket-server-impl</artifactId>
             <version>${jetty.version}</version>
         </dependency>
-
         <dependency>
             <groupId>org.eclipse.jetty.websocket</groupId>
             <artifactId>websocket-client</artifactId>
             <version>${jetty.version}</version>
         </dependency>
-
         <dependency>
             <groupId>org.eclipse.jetty.websocket</groupId>
             <artifactId>websocket-common</artifactId>
             <version>${jetty.version}</version>
         </dependency>
-
         <dependency>
             <groupId>org.eclipse.jetty</groupId>
             <artifactId>jetty-client</artifactId>
             <version>${jetty.version}</version>
         </dependency>
-
         <dependency>
             <groupId>org.eclipse.jetty.websocket</groupId>
             <artifactId>javax-websocket-client-impl</artifactId>
             <version>${jetty.version}</version>
         </dependency>
-
         <dependency>
             <groupId>org.eclipse.jetty</groupId>
             <artifactId>jetty-xml</artifactId>
             <version>${jetty.version}</version>
         </dependency>
-
-
         <!-- End JETTY IMPORTS -->
 
         <dependency>
@@ -271,51 +224,45 @@
             <artifactId>jaxb-api</artifactId>
             <version>2.2.11</version>
         </dependency>
-
         <dependency>
             <groupId>com.sun.xml.bind</groupId>
             <artifactId>jaxb-core</artifactId>
             <version>2.2.11</version>
         </dependency>
-
         <dependency>
             <groupId>com.sun.xml.bind</groupId>
             <artifactId>jaxb-impl</artifactId>
             <version>2.2.11</version>
         </dependency>
 
-        <!-- https://mvnrepository.com/artifact/org.jboss.logging/jboss-logging -->
         <dependency>
             <groupId>org.jboss.logging</groupId>
             <artifactId>jboss-logging</artifactId>
             <version>3.3.1.Final</version>
         </dependency>
 
-        <!-- https://mvnrepository.com/artifact/javax.inject/javax.inject -->
         <dependency>
             <groupId>javax.inject</groupId>
             <artifactId>javax.inject</artifactId>
             <version>1</version>
         </dependency>
 
-
-        <!-- https://mvnrepository.com/artifact/org.glassfish.hk2.external/aopalliance-repackaged -->
         <dependency>
             <groupId>org.glassfish.hk2.external</groupId>
             <artifactId>aopalliance-repackaged</artifactId>
             <version>2.5.0-b32</version>
         </dependency>
 
-
+        <!-- Runtime-required and not exported by any other bundle, so it must be embedded:
+             scope must be compile (was 'provided', which only worked because the old
+             scope-less Embed-Dependency swept provided jars in anyway). -->
         <dependency>
             <groupId>javax.websocket</groupId>
             <artifactId>javax.websocket-api</artifactId>
             <version>1.1</version>
-            <scope>provided</scope>
         </dependency>
 
     </dependencies>
-
 
     <build>
         <resources>
@@ -330,22 +277,12 @@
         </resources>
         <plugins>
 
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-compiler-plugin</artifactId>
-                <version>${maven.compiler.version}</version>
-                <configuration>
-                    <source>${jdk}</source>
-                    <target>${jdk}</target>
-                </configuration>
-            </plugin>
+            <!-- maven-compiler-plugin (source/target 21) inherited from cresco-parent -->
 
             <plugin>
                 <groupId>org.apache.felix</groupId>
                 <artifactId>maven-bundle-plugin</artifactId>
-                <version>${maven.bundle.compiler.version}</version>
-                <extensions>true</extensions>
-
+                <!-- version + extensions inherited from cresco-parent pluginManagement -->
                 <configuration>
                     <repositoryId>ossrh</repositoryId>
                     <ignoreLock>true</ignoreLock>
@@ -356,28 +293,18 @@
                         <Bundle-Description>The Cresco websocket API</Bundle-Description>
                         <Bundle-Vendor>Cresco.io</Bundle-Vendor>
                         <Bundle-Version>${project.version}-${maven.build.timestamp}</Bundle-Version>
+                        <!-- Real BundleActivator: sets JVM system properties at start (slf4j / JAXB). -->
                         <Bundle-Activator>io.cresco.wsapi.Activator</Bundle-Activator>
-                        <Import-Package>*;resolution:=optional</Import-Package>
-                        <Embed-Dependency>
-                            !org.osgi.*;
-                            !osgi.cmpn.*;
-                            !library;
-                        </Embed-Dependency>
-                        <Export-Package>
-                            <!--
-                            org.hibernate.*;
-                            javax.persistence.*;
-                            org.jboss.logging.*;
-                            org.jboss.jandex.*;
-                            com.fasterxml.classmate.*;
-                            antlr.*;
-                            javax.transaction.*;
-                            net.bytebuddy.*;
-                            org.dom4j.*;
-                            com.coverity.*
-                            -->
-                        </Export-Package>
-                        <Bundle-RequiredExecutionEnvironment>JavaSE-1.8</Bundle-RequiredExecutionEnvironment>
+                        <!-- Cresco SPI + framework + Config Admin are hard requirements; embedded Jetty/BC stay optional. -->
+                        <Import-Package>
+                            org.osgi.framework,
+                            org.osgi.framework.*,
+                            org.osgi.service.cm,
+                            io.cresco.library.*,
+                            *;resolution:=optional
+                        </Import-Package>
+                        <!-- scope=compile|runtime keeps provided (osgi.annotation, javax.websocket-api) jars out of the bundle -->
+                        <Embed-Dependency>!org.osgi.*;!osgi.cmpn.*;!library;*;scope=compile|runtime</Embed-Dependency>
                     </instructions>
                 </configuration>
             </plugin>
