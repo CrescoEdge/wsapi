@@ -180,6 +180,7 @@ public class Plugin implements PluginService {
 
                 // --- HTTPS connector on wsPort ---
                 HttpConfiguration httpsConfig = new HttpConfiguration();
+                httpsConfig.setOutputBufferSize(256 * 1024);
                 SecureRequestCustomizer secureRequestCustomizer = new SecureRequestCustomizer();
                 // self-signed cert / arbitrary connect host: do not enforce SNI host matching
                 secureRequestCustomizer.setSniHostCheck(false);
@@ -191,10 +192,22 @@ public class Plugin implements PluginService {
                 sslContextFactory.setKeyManagerPassword(keystorePassword);
                 sslContextFactory.setIncludeProtocols("TLSv1.2", "TLSv1.3");
 
+                // Jetty 12 defaults TLS to HEAP byte buffers, so every encrypted socket
+                // write/read copies heap->direct across the JVM/OS boundary. On the wss
+                // dataplane that copy was the throughput wall: the send buffered at ~426 MB/s
+                // but the wire only drained ~204. Direct buffers for encrypt/decrypt remove the
+                // copy and restore (and exceed) the old Jetty 11 throughput.
+                SslConnectionFactory sslConnectionFactory =
+                        new SslConnectionFactory(sslContextFactory, HttpVersion.HTTP_1_1.asString());
+
                 ServerConnector sslConnector = new ServerConnector(server,
-                        new SslConnectionFactory(sslContextFactory, HttpVersion.HTTP_1_1.asString()),
+                        sslConnectionFactory,
                         new HttpConnectionFactory(httpsConfig));
                 sslConnector.setPort(wsPort);
+                // Enlarge accepted-socket TCP buffers (SO_RCVBUF/SO_SNDBUF); the small default
+                // throttles bulk dataplane throughput via TCP flow control.
+                sslConnector.setAcceptedReceiveBufferSize(4 * 1024 * 1024);
+                sslConnector.setAcceptedSendBufferSize(4 * 1024 * 1024);
                 server.addConnector(sslConnector);
                 server.setStopAtShutdown(true);
 
@@ -208,6 +221,22 @@ public class Plugin implements PluginService {
 
                 JakartaWebSocketServletContainerInitializer.configure(servletContextHandler,
                         (servletContext, serverContainer) -> {
+                            // Disable permessage-deflate. The dataplane carries binary/
+                            // incompressible payloads, and per-message deflate is a heavy CPU
+                            // cost on both ends — it was the single largest dataplane throughput
+                            // bottleneck (256KB: ~217 -> ~460 MB/s once off). Clients that request
+                            // it simply get no extension negotiated.
+                            try {
+                                ((org.eclipse.jetty.ee10.websocket.jakarta.common.JakartaWebSocketContainer) serverContainer)
+                                        .getWebSocketComponents()
+                                        .getExtensionRegistry().unregister("permessage-deflate");
+                            } catch (Exception ex) {
+                                logger.warn("could not unregister permessage-deflate: " + ex.getMessage());
+                            }
+                            // NOTE: websocket core inputBufferSize is intentionally left at its
+                            // default. Raising it (in @OnOpen OR on the container's defaultCustomizer)
+                            // corrupts binary messages spanning >1 TLS record on Jetty 12.0.17, and
+                            // gave no throughput benefit anyway.
                             serverContainer.addEndpoint(APISocket.class);
                             serverContainer.addEndpoint(APIDataPlane.class);
                             serverContainer.addEndpoint(APILogStreamer.class);

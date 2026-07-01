@@ -18,6 +18,8 @@ import jakarta.websocket.*;
 import jakarta.websocket.ClientEndpoint;
 import jakarta.websocket.OnOpen;
 import jakarta.websocket.server.ServerEndpoint;
+import org.eclipse.jetty.ee10.websocket.jakarta.common.JakartaWebSocketSession;
+import org.eclipse.jetty.websocket.core.CoreSession;
 import java.lang.reflect.Type;
 import java.nio.ByteBuffer;
 import java.util.*;
@@ -59,6 +61,13 @@ public class APIDataPlane
         sess.setMaxIdleTimeout(0);
         sess.setMaxBinaryMessageBufferSize(1024 * 1024 * 1024);
         sess.setMaxTextMessageBufferSize(1024 * 1024 * 1024);
+
+        // NOTE: CoreSession.setInputBufferSize() is intentionally NOT called. On Jetty 12.0.17 it
+        // corrupts the leading 16 bytes of any binary message spanning more than one TLS record
+        // (proven with a raw Python sender: server receives an all-zero header, byte-for-byte),
+        // even when matched with maxFrameSize/maxBinaryMessageSize on both peers — AND it lowers
+        // throughput. The default read buffer is byte-exact and, with async send + no
+        // permessage-deflate, already matches the pre-Jetty-12 large-message throughput.
 
         synchronized (lockSessions) {
             sessions.add(sess);
@@ -165,13 +174,15 @@ public class APIDataPlane
 
     }
 
+    // Whole-message binary handler. The (byte[], boolean last) signature would opt into
+    // jakarta.websocket PARTIAL delivery, which Jetty 12 honors by handing us input-buffer
+    // -sized fragments (~8KB) of a large message — each of which we would forward to the
+    // broker as its own BytesMessage, shattering the caller's message boundaries (and the
+    // embedded seq_num/timestamp header lives only in fragment 0). Large transfers are
+    // already chunked at the application layer via seq_num, so each websocket message must
+    // be delivered whole. onOpen sets maxBinaryMessageBufferSize=1GB to allow that.
     @OnMessage
-    public void processUpload(byte[] b, boolean last, Session sess) {
-
-        if(!last) {
-            logger.error("processUpload(byte[] b, boolean last, Session sess) PARTIAL NOT IMPLEMENTED !!!!");
-            logger.error("byte len: " + b.length + " last: " + last);
-        }
+    public void processUpload(byte[] b, Session sess) {
 
         if(isActive(sess)) {
 
@@ -219,8 +230,7 @@ public class APIDataPlane
                         //System.out.println("onMessage(Message msg)  dataplane");
                         //logger.error("WHY ME");
                         if (msg instanceof TextMessage) {
-                            sess.getAsyncRemote().sendObject(((TextMessage) msg).getText());
-                            //System.out.println("onMessage(Message msg) " + msg);
+                            sess.getAsyncRemote().sendText(((TextMessage) msg).getText());
 
                         } else if (msg instanceof BytesMessage) {
                             String transferId = msg.getStringProperty("transfer_id");
