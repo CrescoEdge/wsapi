@@ -62,12 +62,20 @@ public class APIDataPlane
         sess.setMaxBinaryMessageBufferSize(1024 * 1024 * 1024);
         sess.setMaxTextMessageBufferSize(1024 * 1024 * 1024);
 
-        // NOTE: CoreSession.setInputBufferSize() is intentionally NOT called. On Jetty 12.0.17 it
-        // corrupts the leading 16 bytes of any binary message spanning more than one TLS record
-        // (proven with a raw Python sender: server receives an all-zero header, byte-for-byte),
-        // even when matched with maxFrameSize/maxBinaryMessageSize on both peers — AND it lowers
-        // throughput. The default read buffer is byte-exact and, with async send + no
-        // permessage-deflate, already matches the pre-Jetty-12 large-message throughput.
+        // Enlarge the websocket core I/O buffers so a large binary block isn't read/written in
+        // 4KB (default) chunks, which throttled dataplane throughput. Deployment-tunable via the
+        // "dataplane_io_buffer_bytes" plugin config; default 256KB.
+        // NOTE: requires Jetty >= 12.1. On 12.0.x setInputBufferSize corrupted binary messages
+        // spanning more than one TLS record (leading 16 bytes zeroed); fixed in 12.1.
+        try {
+            int ioBuf = 256 * 1024;
+            if (plugin != null && plugin.getConfig() != null) {
+                ioBuf = plugin.getConfig().getIntegerParam("dataplane_io_buffer_bytes", ioBuf);
+            }
+            CoreSession core = ((JakartaWebSocketSession) sess).getCoreSession();
+            core.setInputBufferSize(ioBuf);
+            core.setOutputBufferSize(ioBuf);
+        } catch (Exception ex) { if (logger != null) logger.warn("dataplane I/O buffer tune failed: " + ex.getMessage()); }
 
         synchronized (lockSessions) {
             sessions.add(sess);

@@ -45,7 +45,7 @@
     <properties>
         <!-- jdk, encoding, plugin & OSGi API / gson versions inherited from cresco-parent -->
         <!-- Rebuilt on Jetty 12 (jakarta.servlet 6 / jakarta.websocket 2). Jetty 9.4 was EOL. -->
-        <jetty.version>12.0.17</jetty.version>
+        <jetty.version>12.1.10</jetty.version>
         <bouncycastle.version>1.78.1</bouncycastle.version>
     </properties>
 
