@@ -156,13 +156,13 @@
                             *;resolution:=optional
                         </Import-Package>
                         <!-- Self-contained: embed the full Jetty 12 closure + jakarta.servlet/websocket
-                             + BouncyCastle + slf4j-api. Embed-Transitive is required because Jetty pulls
-                             its modules (jetty-util/http/io, jakarta.websocket/servlet-api, slf4j-api 2.x)
-                             transitively. Jetty needs slf4j 2.x, but the framework only exports slf4j 1.7
-                             (pax-logging), so wsapi carries its own slf4j 2.x (OSGi-isolated) for Jetty's
-                             internal logging. scope=compile|runtime keeps provided (OSGi, library) jars out. -->
+                             + BouncyCastle. Embed-Transitive is required because Jetty pulls its modules
+                             (jetty-util/http/io, jakarta.websocket/servlet-api) transitively. slf4j-api is
+                             NOT embedded: the framework exports SLF4J 2.x (Pax Logging 2.x), so Jetty's
+                             logging binds to the framework's log4j2 and lands in main.log.
+                             scope=compile|runtime keeps provided (OSGi, library) jars out. -->
                         <Embed-Transitive>true</Embed-Transitive>
-                        <Embed-Dependency>!org.osgi.*;!osgi.cmpn.*;!library;*;scope=compile|runtime</Embed-Dependency>
+                        <Embed-Dependency>!org.osgi.*;!osgi.cmpn.*;!library;!slf4j-api;*;scope=compile|runtime</Embed-Dependency>
                     </instructions>
                 </configuration>
             </plugin>
