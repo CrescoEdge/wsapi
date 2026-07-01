@@ -64,10 +64,9 @@ public class APILogStreamer
             }
 
         } catch (Exception ex) {
-            ex.printStackTrace();
+            logger.error("onWebSocketConnect() createListener failed", ex);
             responce.put("status_code", "90");
             responce.put("status_desc", ex.getMessage());
-            ex.printStackTrace();
         }
 
         sess.getAsyncRemote().sendObject(gson.toJson(responce));
@@ -82,7 +81,7 @@ public class APILogStreamer
 
                 public void onMessage(Message msg) {
                     try {
-                        System.out.println("onMessage(Message msg) log");
+                        logger.debug("onMessage(Message msg) log");
                         if (msg instanceof TextMessage) {
 
                             TextMessage textMessage = (TextMessage)msg;
@@ -93,7 +92,7 @@ public class APILogStreamer
 
                     } catch(Exception ex) {
 
-                        ex.printStackTrace();
+                        logger.error("MessageListener.onMessage() failed", ex);
                     }
                 }
             };
@@ -106,7 +105,7 @@ public class APILogStreamer
             isCreated = true;
 
         } catch (Exception ex) {
-            ex.printStackTrace();
+            logger.error("createListener() failed", ex);
         }
 
         return isCreated;
@@ -187,7 +186,7 @@ public class APILogStreamer
     @OnError
     public void onWebSocketError(Throwable cause)
     {
-        cause.printStackTrace(System.err);
+        logger.error("websocket error", cause);
     }
 
     private boolean isAgentLogDP(String sessionId, String region_id, String agent_id) {
@@ -203,7 +202,7 @@ public class APILogStreamer
                 }
             }
         } catch (Exception ex) {
-            ex.printStackTrace();
+            logger.error("isAgentLogDP() failed", ex);
         }
         return isEnable;
     }
@@ -232,7 +231,7 @@ public class APILogStreamer
                 }
             }
         } catch (Exception ex) {
-            ex.printStackTrace();
+            logger.error("setAgentLogDP() failed", ex);
         }
         return isSet;
     }

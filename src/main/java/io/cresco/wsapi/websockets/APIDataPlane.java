@@ -154,10 +154,9 @@ public class APIDataPlane
                 }
 
             } catch (Exception ex) {
-                ex.printStackTrace();
+                logger.error("onWebSocketText() createListener failed", ex);
                 responce.put("status_code", "90");
                 responce.put("status_desc", ex.getMessage());
-                ex.printStackTrace();
             }
 
             sess.getAsyncRemote().sendObject(gson.toJson(responce));
@@ -245,8 +244,7 @@ public class APIDataPlane
 
                     } catch(Exception ex) {
 
-                        ex.printStackTrace();
-                        logger.error("error createListener: " + ex.getMessage());
+                        logger.error("MessageListener.onMessage() failed", ex);
                     }
                 }
             };
@@ -277,7 +275,7 @@ public class APIDataPlane
             isCreated = true;
 
         } catch (Exception ex) {
-            ex.printStackTrace();
+            logger.error("createListener() failed", ex);
         }
 
         return isCreated;
@@ -293,7 +291,7 @@ public class APIDataPlane
             listenerid = sessionMap.get(sess.getId()).getListenerId();
 
         }
-        System.out.println("closeListner() sessionId: " + sess.getId() + " listenerid: " + listenerid);
+        logger.info("closeListner() sessionId: " + sess.getId() + " listenerid: " + listenerid);
 
         //so we don't get messages about disabling logger
         if (listenerid != null) {
@@ -317,7 +315,7 @@ public class APIDataPlane
     @OnError
     public void onWebSocketError(Throwable cause)
     {
-        cause.printStackTrace(System.err);
+        logger.error("websocket error", cause);
     }
 
 

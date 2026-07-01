@@ -279,7 +279,7 @@ public class APISocket
     @OnError
     public void onWebSocketError(Throwable cause)
     {
-        cause.printStackTrace(System.err);
+        logger.error("websocket error", cause);
     }
 
 

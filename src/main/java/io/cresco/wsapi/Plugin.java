@@ -42,6 +42,9 @@ import org.osgi.framework.BundleContext;
 import org.osgi.service.cm.ConfigurationAdmin;
 import org.osgi.service.component.annotations.*;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.File;
 import java.io.FileOutputStream;
 import java.math.BigInteger;
@@ -81,6 +84,8 @@ public class Plugin implements PluginService {
     public static PluginBuilder pluginBuilder;
     private io.cresco.library.plugin.Executor executor;
     private CLogger logger;
+    // SLF4J fallback for the bootstrap window before the CLogger (pluginBuilder) is available.
+    private static final Logger slog = LoggerFactory.getLogger(Plugin.class);
     private ConfigurationAdmin configurationAdmin;
     private Map<String,Object> map;
 
@@ -105,7 +110,9 @@ public class Plugin implements PluginService {
 
     @Modified
     void modified(BundleContext context, Map<String,Object> map) {
-        System.out.println("Modified Config Map PluginID:" + (String) map.get("pluginID"));
+        if (logger != null) {
+            logger.info("Modified Config Map PluginID:" + (String) map.get("pluginID"));
+        }
     }
 
     @Deactivate
@@ -217,7 +224,11 @@ public class Plugin implements PluginService {
             return true;
 
         } catch (Exception ex) {
-            ex.printStackTrace();
+            if (logger != null) {
+                logger.error("isStarted() failed to start wsapi Jetty server", ex);
+            } else {
+                slog.error("isStarted() failed to start wsapi Jetty server", ex);
+            }
             return false;
         }
     }
@@ -274,7 +285,11 @@ public class Plugin implements PluginService {
             }
 
         } catch (Exception ex) {
-            ex.printStackTrace();
+            if (logger != null) {
+                logger.error("generateCertChainKeyStore() failed", ex);
+            } else {
+                slog.error("generateCertChainKeyStore() failed", ex);
+            }
         }
     }
 
@@ -294,9 +309,9 @@ public class Plugin implements PluginService {
                 server.stop();
             } catch (Exception ex) {
                 if (logger != null) {
-                    logger.error("wsapi embedded server shutdown error: " + ex.getMessage());
+                    logger.error("wsapi embedded server shutdown error", ex);
                 } else {
-                    ex.printStackTrace();
+                    slog.error("wsapi embedded server shutdown error", ex);
                 }
             }
         }
