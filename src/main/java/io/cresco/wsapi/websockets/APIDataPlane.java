@@ -14,10 +14,10 @@ import jakarta.jms.MessageListener;
 import jakarta.jms.TextMessage;
 
 
-import javax.websocket.*;
-import javax.websocket.ClientEndpoint;
-import javax.websocket.OnOpen;
-import javax.websocket.server.ServerEndpoint;
+import jakarta.websocket.*;
+import jakarta.websocket.ClientEndpoint;
+import jakarta.websocket.OnOpen;
+import jakarta.websocket.server.ServerEndpoint;
 import java.lang.reflect.Type;
 import java.nio.ByteBuffer;
 import java.util.*;

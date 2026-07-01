@@ -3,46 +3,62 @@ package io.cresco.wsapi;
 import io.cresco.wsapi.websockets.APIDataPlane;
 import io.cresco.wsapi.websockets.APILogStreamer;
 import io.cresco.wsapi.websockets.APISocket;
+import io.cresco.wsapi.websockets.AuthFilter;
 import io.cresco.library.agent.AgentService;
 import io.cresco.library.messaging.MsgEvent;
-import io.cresco.library.plugin.Executor;
 import io.cresco.library.plugin.PluginBuilder;
 import io.cresco.library.plugin.PluginService;
 import io.cresco.library.utilities.CLogger;
-import io.cresco.wsapi.websockets.AuthFilter;
+
+import jakarta.servlet.DispatcherType;
+
 import org.bouncycastle.asn1.x500.X500Name;
+import org.bouncycastle.asn1.x500.X500NameBuilder;
+import org.bouncycastle.asn1.x500.style.BCStyle;
 import org.bouncycastle.asn1.x509.BasicConstraints;
 import org.bouncycastle.asn1.x509.Extension;
 import org.bouncycastle.asn1.x509.KeyUsage;
-import org.bouncycastle.cert.X509v3CertificateBuilder;
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.bouncycastle.operator.ContentSigner;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
-import org.bouncycastle.x509.X509V1CertificateGenerator;
+
+import org.eclipse.jetty.ee10.servlet.FilterHolder;
+import org.eclipse.jetty.ee10.servlet.ServletContextHandler;
+import org.eclipse.jetty.ee10.websocket.jakarta.server.config.JakartaWebSocketServletContainerInitializer;
 import org.eclipse.jetty.http.HttpVersion;
-import org.eclipse.jetty.server.*;
-import org.eclipse.jetty.servlet.FilterHolder;
-import org.eclipse.jetty.servlet.ServletContextHandler;
+import org.eclipse.jetty.server.HttpConfiguration;
+import org.eclipse.jetty.server.HttpConnectionFactory;
+import org.eclipse.jetty.server.SecureRequestCustomizer;
+import org.eclipse.jetty.server.Server;
+import org.eclipse.jetty.server.ServerConnector;
+import org.eclipse.jetty.server.SslConnectionFactory;
+import org.eclipse.jetty.util.VirtualThreads;
 import org.eclipse.jetty.util.ssl.SslContextFactory;
-import org.eclipse.jetty.websocket.api.WebSocketBehavior;
-import org.eclipse.jetty.websocket.api.WebSocketPolicy;
-import org.eclipse.jetty.websocket.jsr356.server.ServerContainer;
-import org.eclipse.jetty.websocket.jsr356.server.deploy.WebSocketServerContainerInitializer;
-import org.joda.time.DateTime;
+import org.eclipse.jetty.util.thread.QueuedThreadPool;
+
 import org.osgi.framework.BundleContext;
 import org.osgi.service.cm.ConfigurationAdmin;
 import org.osgi.service.component.annotations.*;
 
-import javax.security.auth.x500.X500Principal;
-import javax.servlet.DispatcherType;
-import java.io.*;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.math.BigInteger;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.security.*;
-import java.security.cert.CertificateException;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.KeyStore;
+import java.security.SecureRandom;
+import java.security.Security;
 import java.security.cert.X509Certificate;
-import java.util.*;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.Date;
+import java.util.EnumSet;
+import java.util.Map;
+import java.util.concurrent.Executor;
 
 
 @Component(
@@ -52,25 +68,28 @@ import java.util.*;
         property="wsapi=core",
         reference= { @Reference(name="io.cresco.library.agent.AgentService", service=AgentService.class)}
 )
-
 public class Plugin implements PluginService {
 
-    //public PluginBuilder getPluginBuilder() { return  pluginBuilder; }
+    /** Default wss/https listen port; overridable via config key "wsapi_port". */
+    private static final int DEFAULT_WS_PORT = 8282;
+    /** Default keystore/key password; overridable via config key "wsapi_keystore_password". */
+    private static final String DEFAULT_KEYSTORE_PASSWORD = "cresco";
 
     public BundleContext context;
+    // Jetty instantiates the @ServerEndpoint / AuthFilter classes itself (not via DS), so they
+    // reach the plugin through this static reference.
     public static PluginBuilder pluginBuilder;
-    private Executor executor;
+    private io.cresco.library.plugin.Executor executor;
     private CLogger logger;
-    //private HttpService server;
-    public String repoPath = null;
     private ConfigurationAdmin configurationAdmin;
     private Map<String,Object> map;
-    private Server jettyServer;
-    private ServerContainer wscontainer;
+
+    // Assigned when the embedded Jetty 12 server starts, so isStopped() can actually stop it
+    // (the previous build left the server in a local variable and leaked it on stop).
+    private volatile Server jettyServer;
 
     @Activate
     void activate(BundleContext context, Map<String,Object> map) {
-
         this.context = context;
         this.map = map;
     }
@@ -84,7 +103,6 @@ public class Plugin implements PluginService {
         this.configurationAdmin = null;
     }
 
-
     @Modified
     void modified(BundleContext context, Map<String,Object> map) {
         System.out.println("Modified Config Map PluginID:" + (String) map.get("pluginID"));
@@ -92,17 +110,9 @@ public class Plugin implements PluginService {
 
     @Deactivate
     void deactivate(BundleContext context, Map<String,Object> map) {
-
         isStopped();
-
-        if(this.context != null) {
-            this.context = null;
-        }
-
-        if(this.map != null) {
-            this.map = null;
-        }
-
+        this.context = null;
+        this.map = null;
     }
 
     @Override
@@ -121,30 +131,11 @@ public class Plugin implements PluginService {
         return true;
     }
 
-    private Dictionary<String, String> getJerseyServletParams() {
-        Dictionary<String, String> jerseyServletParams = new Hashtable<>();
-        jerseyServletParams.put("javax.ws.rs.Application", Plugin.class.getName());
-        return jerseyServletParams;
-    }
-
-    private String getRepoPath() {
-        String path = null;
-        try {
-            //todo create seperate director for repo
-            path = new File(Plugin.class.getProtectionDomain().getCodeSource().getLocation().toURI()).getParent();
-
-        } catch(Exception ex) {
-            //logger.error(ex.getMessage());
-            ex.printStackTrace();
-        }
-        return path;
-    }
-
     @Override
     public boolean isStarted() {
         try {
 
-            if(pluginBuilder == null) {
+            if (pluginBuilder == null) {
                 pluginBuilder = new PluginBuilder(this.getClass().getName(), context, map);
                 this.logger = pluginBuilder.getLogger(Plugin.class.getName(), CLogger.Level.Info);
                 this.executor = new PluginExecutor(pluginBuilder);
@@ -152,211 +143,166 @@ public class Plugin implements PluginService {
 
                 while (!pluginBuilder.getAgentService().getAgentState().isActive()) {
                     logger.info("Plugin " + pluginBuilder.getPluginID() + " waiting on Agent Init");
-                    //System.out.println("Plugin " + pluginBuilder.getPluginID() + " waiting on Agent Init");
                     Thread.sleep(1000);
                 }
 
-                // use secure sockets
-                Server server = new Server();
-                HttpConfiguration https = new HttpConfiguration();
-                https.addCustomizer(new SecureRequestCustomizer());
-
-                SslContextFactory sslContextFactory = new SslContextFactory.Server();
-
-                Path kyStorePath = Paths.get(pluginBuilder.getPluginDataDirectory() + File.separator + "ws.keystore");
-
-                try {
-                    if (!kyStorePath.toFile().exists()) {
-                        generateCertChainKeyStore(kyStorePath);
-                    }
-                } catch (Exception ex) {
-                    StringWriter sw = new StringWriter();
-                    PrintWriter pw = new PrintWriter(sw);
-                    ex.printStackTrace(pw);
-                    logger.error(pw.toString());
+                int wsPort = DEFAULT_WS_PORT;
+                String portStr = pluginBuilder.getConfig().getStringParam("wsapi_port");
+                if (portStr != null) {
+                    try { wsPort = Integer.parseInt(portStr.trim()); } catch (NumberFormatException ignore) { }
+                }
+                String keystorePassword = pluginBuilder.getConfig().getStringParam("wsapi_keystore_password");
+                if (keystorePassword == null) {
+                    keystorePassword = DEFAULT_KEYSTORE_PASSWORD;
                 }
 
+                // Ensure a self-signed keystore exists for the wss connector.
+                Path keyStorePath = Paths.get(pluginBuilder.getPluginDataDirectory() + File.separator + "ws.keystore");
+                if (!keyStorePath.toFile().exists()) {
+                    generateCertChainKeyStore(keyStorePath, keystorePassword.toCharArray());
+                }
 
-                //KeyStore ks = KeyStore.getInstance("JKS");
-                //ks.load(getClass().getClassLoader().getResourceAsStream("ws.keystore"), "cresco".toCharArray());
+                // --- Jetty 12 thread pool (virtual threads for blocking work on JDK 21+) ---
+                QueuedThreadPool threadPool = new QueuedThreadPool();
+                threadPool.setName("wsapi");
+                Executor virtualThreads = VirtualThreads.getDefaultVirtualThreadsExecutor();
+                if (virtualThreads != null) {
+                    threadPool.setVirtualThreadsExecutor(virtualThreads);
+                }
+                Server server = new Server(threadPool);
 
-                //sslContextFactory.setKeyStore(ks);
-                //sslContextFactory.setKeyStorePath("/Users/cody/IdeaProjects/wsapi/ssl/ws.keystore");
-                sslContextFactory.setKeyStorePath(kyStorePath.toString());
-                sslContextFactory.setKeyStorePassword("cresco");
-                sslContextFactory.setKeyManagerPassword("cresco");
-                //sslContextFactory.setIncludeProtocols("TLSv1.2", "TLSv1.3");
-                sslContextFactory.setIncludeProtocols("TLSv1.2");
+                // --- HTTPS connector on wsPort ---
+                HttpConfiguration httpsConfig = new HttpConfiguration();
+                SecureRequestCustomizer secureRequestCustomizer = new SecureRequestCustomizer();
+                // self-signed cert / arbitrary connect host: do not enforce SNI host matching
+                secureRequestCustomizer.setSniHostCheck(false);
+                httpsConfig.addCustomizer(secureRequestCustomizer);
+
+                SslContextFactory.Server sslContextFactory = new SslContextFactory.Server();
+                sslContextFactory.setKeyStorePath(keyStorePath.toString());
+                sslContextFactory.setKeyStorePassword(keystorePassword);
+                sslContextFactory.setKeyManagerPassword(keystorePassword);
+                sslContextFactory.setIncludeProtocols("TLSv1.2", "TLSv1.3");
+
                 ServerConnector sslConnector = new ServerConnector(server,
                         new SslConnectionFactory(sslContextFactory, HttpVersion.HTTP_1_1.asString()),
-                        new HttpConnectionFactory(https));
-                //sslConnector.setHost(serverName); // EDIT: this line was the problem, removing it fixed everything.
-                sslConnector.setPort(8282);
-                server.setConnectors(new Connector[] { sslConnector });
-
+                        new HttpConnectionFactory(httpsConfig));
+                sslConnector.setPort(wsPort);
+                server.addConnector(sslConnector);
                 server.setStopAtShutdown(true);
-                server.setDumpAfterStart(false);
-                server.setDumpBeforeStop(false);
 
-
-                // Initialize JSR-356 style websocket
-                ServletContextHandler servletContextHandler =
-                        new ServletContextHandler(ServletContextHandler.SESSIONS);
+                // --- Servlet context + AuthFilter + Jakarta WebSocket endpoints ---
+                ServletContextHandler servletContextHandler = new ServletContextHandler(ServletContextHandler.SESSIONS);
                 servletContextHandler.setContextPath("/");
                 server.setHandler(servletContextHandler);
 
-                EnumSet<DispatcherType> SCOPE = EnumSet.of(DispatcherType.REQUEST);
-                // Jetty DoSFilter, wrapped so we can set init parameters
-                /*
-                FilterHolder holder = new FilterHolder( DoSFilter.class );
-                // see DoSFilter Javadoc for names and meanings of init parameters
-                holder.setInitParameter("maxRequestsPerSec", "100"); // "1" for testing
-                holder.setInitParameter("delayMs", "200"); // "-1" to reject excess request
-                holder.setInitParameter("remotePort", "false"); // "true" may be useful
-                servletContextHandler.addFilter( holder, "/*", SCOPE );
-                 */
+                servletContextHandler.addFilter(new FilterHolder(AuthFilter.class), "/*",
+                        EnumSet.of(DispatcherType.REQUEST));
 
-                FilterHolder auth = new FilterHolder( AuthFilter.class );
-                servletContextHandler.addFilter( auth, "/*", SCOPE );
-
-                ServerContainer container =
-                        WebSocketServerContainerInitializer.configureContext(servletContextHandler);
-
-                container.addEndpoint(APISocket.class);
-                container.addEndpoint(APIDataPlane.class);
-                container.addEndpoint(APILogStreamer.class);
+                JakartaWebSocketServletContainerInitializer.configure(servletContextHandler,
+                        (servletContext, serverContainer) -> {
+                            serverContainer.addEndpoint(APISocket.class);
+                            serverContainer.addEndpoint(APIDataPlane.class);
+                            serverContainer.addEndpoint(APILogStreamer.class);
+                        });
 
                 server.start();
-                logger.info("Started server: " + server);
-                if (server.getConnectors().length > 0) {
-                    logger.info("Connector = " + server.getConnectors()[0] +
-                            " isRunning=" + server.getConnectors()[0].isRunning());
-                }
+                this.jettyServer = server;   // assign so isStopped() can shut it down (no more leak)
+
+                logger.info("wsapi Jetty 12 server started on wss port " + wsPort
+                        + " (virtualThreads=" + (virtualThreads != null) + ")");
 
                 pluginBuilder.setIsActive(true);
-
-
             }
             return true;
 
-        } catch(Exception ex) {
+        } catch (Exception ex) {
             ex.printStackTrace();
             return false;
         }
     }
 
-    private KeyPair generateKeyPair() throws NoSuchAlgorithmException, NoSuchProviderException {
-        KeyPairGenerator kpGen = KeyPairGenerator.getInstance("RSA", "BC");
-        kpGen.initialize(1024, new SecureRandom());
-        return kpGen.generateKeyPair();
-    }
-
-    private void generateCertChainKeyStore(Path kyStorePath) {
-
+    /**
+     * Generate a self-signed RSA keypair + X.509 certificate and store it in a fresh keystore.
+     * The plugin identity is split across three DN attributes (O=region, OU=agent, CN=plugin)
+     * so each value stays within the X.509 64-char attribute limit; the previous build packed
+     * region_agent_plugin into a single CN, which overflowed 64 chars and broke client parsing.
+     */
+    private void generateCertChainKeyStore(Path keyStorePath, char[] password) {
         try {
+            if (Security.getProvider("BC") == null) {
+                Security.addProvider(new BouncyCastleProvider());
+            }
 
             Path pluginDataDir = Paths.get(pluginBuilder.getPluginDataDirectory());
             if (!pluginDataDir.toFile().exists()) {
-
                 pluginDataDir.toFile().mkdirs();
-
             }
 
             KeyStore ks = KeyStore.getInstance(KeyStore.getDefaultType());
-
-            char[] password = "cresco".toCharArray();
             ks.load(null, password);
 
-
-            // Create self signed Root CA certificate
-
-            //String agentName = "wsapi-" + UUID.randomUUID();
-
-            // yesterday
-            //Date validityBeginDate = new Date(System.currentTimeMillis() - 24 * 60 * 60 * 1000);
-            // in 2 years
-            //Date validityEndDate = new Date(System.currentTimeMillis() + 25 * 365 * 24 * 60 * 60 * 1000);
-
-            DateTime validityBeginDate = DateTime.now().minusDays(1);
-            DateTime validityEndDate = validityBeginDate.plusYears(5);
-
-            // GENERATE THE PUBLIC/PRIVATE RSA KEY PAIR
             KeyPairGenerator keyPairGenerator = KeyPairGenerator.getInstance("RSA", "BC");
-            keyPairGenerator.initialize(1024, new SecureRandom());
+            keyPairGenerator.initialize(2048, new SecureRandom());
+            KeyPair keyPair = keyPairGenerator.generateKeyPair();
 
-            java.security.KeyPair keyPair = keyPairGenerator.generateKeyPair();
+            Instant notBefore = Instant.now().minus(1, ChronoUnit.DAYS);
+            Instant notAfter = notBefore.plus(365L * 5, ChronoUnit.DAYS);
 
-            // GENERATE THE X509 CERTIFICATE
-            X509V1CertificateGenerator certGen = new X509V1CertificateGenerator();
+            X500Name subject = new X500NameBuilder(BCStyle.INSTANCE)
+                    .addRDN(BCStyle.O, boundedRDN(pluginBuilder.getRegion()))
+                    .addRDN(BCStyle.OU, boundedRDN(pluginBuilder.getAgent()))
+                    .addRDN(BCStyle.CN, boundedRDN(pluginBuilder.getPluginID()))
+                    .build();
 
-            String serverId = "CN=" + pluginBuilder.getRegion() + '_' + pluginBuilder.getAgent() + '_' + pluginBuilder.getPluginID();
-            X500Principal dnName = new X500Principal(serverId);
+            BigInteger serial = new BigInteger(159, new SecureRandom()); // positive, unpredictable
 
-            certGen.setSerialNumber(BigInteger.valueOf(System.currentTimeMillis()));
-            certGen.setSubjectDN(dnName);
-            certGen.setIssuerDN(dnName); // use the same
-            certGen.setNotBefore(validityBeginDate.toDate());
-            certGen.setNotAfter(validityEndDate.toDate());
-            certGen.setPublicKey(keyPair.getPublic());
-            certGen.setSignatureAlgorithm("SHA256WithRSAEncryption");
+            JcaX509v3CertificateBuilder certBuilder = new JcaX509v3CertificateBuilder(
+                    subject, serial, Date.from(notBefore), Date.from(notAfter), subject, keyPair.getPublic());
+            certBuilder.addExtension(Extension.basicConstraints, true, new BasicConstraints(false));
+            certBuilder.addExtension(Extension.keyUsage, true,
+                    new KeyUsage(KeyUsage.digitalSignature | KeyUsage.keyEncipherment));
 
-            X509Certificate cert = certGen.generate(keyPair.getPrivate(), "BC");
+            ContentSigner signer = new JcaContentSignerBuilder("SHA256WithRSA")
+                    .setProvider("BC").build(keyPair.getPrivate());
+            X509Certificate cert = new JcaX509CertificateConverter().setProvider("BC")
+                    .getCertificate(certBuilder.build(signer));
 
-            X509Certificate[] chain = new X509Certificate[1];
-            chain[0]=cert;
-
-            ks.setKeyEntry("wsapi", keyPair.getPrivate(), password, chain);
-
-            // Store away the keystore.
-            FileOutputStream fos = new FileOutputStream(kyStorePath.toString());
-            ks.store(fos, password);
-            fos.close();
+            ks.setKeyEntry("wsapi", keyPair.getPrivate(), password, new X509Certificate[]{cert});
+            try (FileOutputStream fos = new FileOutputStream(keyStorePath.toString())) {
+                ks.store(fos, password);
+            }
 
         } catch (Exception ex) {
             ex.printStackTrace();
         }
-
     }
 
+    /** Clamp an RDN value to the X.509 64-char attribute limit; never null/empty. */
+    private static String boundedRDN(String value) {
+        if (value == null || value.isEmpty()) {
+            return "unknown";
+        }
+        return value.length() > 64 ? value.substring(0, 64) : value;
+    }
 
     @Override
     public boolean isStopped() {
-
-
-
-        if(wscontainer != null) {
-            if(!wscontainer.isStopped()) {
-                try {
-
-                    wscontainer.stop();
-                    while(!wscontainer.isStopped()) {
-                        logger.error("Waiting on WSAPI (wscontainer) to stop.");
-                    }
-
-                } catch (Exception ex) {
-                    logger.error("embedded web server shutdown error : " + ex.getMessage());
+        Server server = this.jettyServer;
+        if (server != null && !server.isStopped()) {
+            try {
+                server.stop();
+            } catch (Exception ex) {
+                if (logger != null) {
+                    logger.error("wsapi embedded server shutdown error: " + ex.getMessage());
+                } else {
                     ex.printStackTrace();
                 }
             }
         }
+        this.jettyServer = null;
 
-        if(jettyServer != null) {
-            if(!jettyServer.isStopped()) {
-                try {
-
-                    jettyServer.stop();
-                    while(!jettyServer.isStopped()) {
-                        logger.error("Waiting on WSAPI (server) to stop.");
-                    }
-
-                } catch (Exception ex) {
-                    logger.error("embedded web server shutdown error : " + ex.getMessage());
-                    ex.printStackTrace();
-                }
-            }
-        }
-
-        if(pluginBuilder != null) {
+        if (pluginBuilder != null) {
             pluginBuilder.setExecutor(null);
             pluginBuilder.setIsActive(false);
         }
