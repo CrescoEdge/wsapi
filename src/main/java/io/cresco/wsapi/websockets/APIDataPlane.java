@@ -62,13 +62,15 @@ public class APIDataPlane
         sess.setMaxBinaryMessageBufferSize(1024 * 1024 * 1024);
         sess.setMaxTextMessageBufferSize(1024 * 1024 * 1024);
 
-        // Enlarge the websocket core I/O buffers so a large binary block isn't read/written in
-        // 4KB (default) chunks, which throttled dataplane throughput. Deployment-tunable via the
-        // "dataplane_io_buffer_bytes" plugin config; default 256KB.
+        // WebSocket core I/O buffer size. Counter-intuitively, BIG is bad over TLS: the dataplane
+        // runs on wss, and a large WS input buffer misaligns with the 16KB TLS record boundary,
+        // collapsing throughput (isolated Jetty drain, 256KB binary: 765 MB/s at 64KB vs 480 at
+        // 256KB vs 139 at 1MB). 64KB is the sweet spot (~=default) and lifts the dataplane ingress
+        // ~30%. Deployment-tunable via "dataplane_io_buffer_bytes" but keep it <= 64KB on TLS.
         // NOTE: requires Jetty >= 12.1. On 12.0.x setInputBufferSize corrupted binary messages
         // spanning more than one TLS record (leading 16 bytes zeroed); fixed in 12.1.
         try {
-            int ioBuf = 256 * 1024;
+            int ioBuf = 64 * 1024;
             if (plugin != null && plugin.getConfig() != null) {
                 ioBuf = plugin.getConfig().getIntegerParam("dataplane_io_buffer_bytes", ioBuf);
             }
