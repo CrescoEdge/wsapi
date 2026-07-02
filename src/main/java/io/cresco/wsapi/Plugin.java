@@ -1,16 +1,11 @@
 package io.cresco.wsapi;
 
-import io.cresco.wsapi.websockets.APIDataPlane;
-import io.cresco.wsapi.websockets.APILogStreamer;
-import io.cresco.wsapi.websockets.APISocket;
-import io.cresco.wsapi.websockets.AuthFilter;
 import io.cresco.library.agent.AgentService;
 import io.cresco.library.messaging.MsgEvent;
 import io.cresco.library.plugin.PluginBuilder;
 import io.cresco.library.plugin.PluginService;
 import io.cresco.library.utilities.CLogger;
 
-import jakarta.servlet.DispatcherType;
 
 import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.asn1.x500.X500NameBuilder;
@@ -24,19 +19,7 @@ import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.bouncycastle.operator.ContentSigner;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 
-import org.eclipse.jetty.ee10.servlet.FilterHolder;
-import org.eclipse.jetty.ee10.servlet.ServletContextHandler;
-import org.eclipse.jetty.ee10.websocket.jakarta.server.config.JakartaWebSocketServletContainerInitializer;
-import org.eclipse.jetty.http.HttpVersion;
-import org.eclipse.jetty.server.HttpConfiguration;
-import org.eclipse.jetty.server.HttpConnectionFactory;
-import org.eclipse.jetty.server.SecureRequestCustomizer;
-import org.eclipse.jetty.server.Server;
-import org.eclipse.jetty.server.ServerConnector;
-import org.eclipse.jetty.server.SslConnectionFactory;
-import org.eclipse.jetty.util.VirtualThreads;
-import org.eclipse.jetty.util.ssl.SslContextFactory;
-import org.eclipse.jetty.util.thread.QueuedThreadPool;
+import io.cresco.wsapi.netty.NettyWsServer;
 
 import org.osgi.framework.BundleContext;
 import org.osgi.service.cm.ConfigurationAdmin;
@@ -59,9 +42,7 @@ import java.security.cert.X509Certificate;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Date;
-import java.util.EnumSet;
 import java.util.Map;
-import java.util.concurrent.Executor;
 
 
 @Component(
@@ -89,9 +70,8 @@ public class Plugin implements PluginService {
     private ConfigurationAdmin configurationAdmin;
     private Map<String,Object> map;
 
-    // Assigned when the embedded Jetty 12 server starts, so isStopped() can actually stop it
-    // (the previous build left the server in a local variable and leaked it on stop).
-    private volatile Server jettyServer;
+    // Assigned when the embedded Netty WebSocket server starts, so isStopped() can shut it down.
+    private volatile NettyWsServer nettyServer;
 
     @Activate
     void activate(BundleContext context, Map<String,Object> map) {
@@ -169,84 +149,15 @@ public class Plugin implements PluginService {
                     generateCertChainKeyStore(keyStorePath, keystorePassword.toCharArray());
                 }
 
-                // --- Jetty 12 thread pool (virtual threads for blocking work on JDK 21+) ---
-                QueuedThreadPool threadPool = new QueuedThreadPool();
-                threadPool.setName("wsapi");
-                Executor virtualThreads = VirtualThreads.getDefaultVirtualThreadsExecutor();
-                if (virtualThreads != null) {
-                    threadPool.setVirtualThreadsExecutor(virtualThreads);
-                }
-                Server server = new Server(threadPool);
+                // --- Netty WebSocket server (replaces Jetty). One wss listener serves all three
+                //     endpoints; TLS from the same self-signed keystore; cresco_service_key auth on
+                //     the HTTP upgrade; permessage-deflate off; whole-message frame aggregation. ---
+                int ioBuf = pluginBuilder.getConfig().getIntegerParam("dataplane_io_buffer_bytes", 64 * 1024);
+                this.nettyServer = new NettyWsServer(pluginBuilder, wsPort, keyStorePath,
+                        keystorePassword.toCharArray(), ioBuf);
+                this.nettyServer.start();
 
-                // --- HTTPS connector on wsPort ---
-                HttpConfiguration httpsConfig = new HttpConfiguration();
-                httpsConfig.setOutputBufferSize(256 * 1024);
-                SecureRequestCustomizer secureRequestCustomizer = new SecureRequestCustomizer();
-                // self-signed cert / arbitrary connect host: do not enforce SNI host matching
-                secureRequestCustomizer.setSniHostCheck(false);
-                httpsConfig.addCustomizer(secureRequestCustomizer);
-
-                SslContextFactory.Server sslContextFactory = new SslContextFactory.Server();
-                sslContextFactory.setKeyStorePath(keyStorePath.toString());
-                sslContextFactory.setKeyStorePassword(keystorePassword);
-                sslContextFactory.setKeyManagerPassword(keystorePassword);
-                sslContextFactory.setIncludeProtocols("TLSv1.2", "TLSv1.3");
-
-                // Jetty 12 defaults TLS to HEAP byte buffers, so every encrypted socket
-                // write/read copies heap->direct across the JVM/OS boundary. On the wss
-                // dataplane that copy was the throughput wall: the send buffered at ~426 MB/s
-                // but the wire only drained ~204. Direct buffers for encrypt/decrypt remove the
-                // copy and restore (and exceed) the old Jetty 11 throughput.
-                SslConnectionFactory sslConnectionFactory =
-                        new SslConnectionFactory(sslContextFactory, HttpVersion.HTTP_1_1.asString());
-
-                ServerConnector sslConnector = new ServerConnector(server,
-                        sslConnectionFactory,
-                        new HttpConnectionFactory(httpsConfig));
-                sslConnector.setPort(wsPort);
-                // Enlarge accepted-socket TCP buffers (SO_RCVBUF/SO_SNDBUF); the small default
-                // throttles bulk dataplane throughput via TCP flow control.
-                sslConnector.setAcceptedReceiveBufferSize(4 * 1024 * 1024);
-                sslConnector.setAcceptedSendBufferSize(4 * 1024 * 1024);
-                server.addConnector(sslConnector);
-                server.setStopAtShutdown(true);
-
-                // --- Servlet context + AuthFilter + Jakarta WebSocket endpoints ---
-                ServletContextHandler servletContextHandler = new ServletContextHandler(ServletContextHandler.SESSIONS);
-                servletContextHandler.setContextPath("/");
-                server.setHandler(servletContextHandler);
-
-                servletContextHandler.addFilter(new FilterHolder(AuthFilter.class), "/*",
-                        EnumSet.of(DispatcherType.REQUEST));
-
-                JakartaWebSocketServletContainerInitializer.configure(servletContextHandler,
-                        (servletContext, serverContainer) -> {
-                            // Disable permessage-deflate. The dataplane carries binary/
-                            // incompressible payloads, and per-message deflate is a heavy CPU
-                            // cost on both ends — it was the single largest dataplane throughput
-                            // bottleneck (256KB: ~217 -> ~460 MB/s once off). Clients that request
-                            // it simply get no extension negotiated.
-                            try {
-                                ((org.eclipse.jetty.ee10.websocket.jakarta.common.JakartaWebSocketContainer) serverContainer)
-                                        .getWebSocketComponents()
-                                        .getExtensionRegistry().unregister("permessage-deflate");
-                            } catch (Exception ex) {
-                                logger.warn("could not unregister permessage-deflate: " + ex.getMessage());
-                            }
-                            // NOTE: websocket core inputBufferSize is intentionally left at its
-                            // default. Raising it (in @OnOpen OR on the container's defaultCustomizer)
-                            // corrupts binary messages spanning >1 TLS record on Jetty 12.0.17, and
-                            // gave no throughput benefit anyway.
-                            serverContainer.addEndpoint(APISocket.class);
-                            serverContainer.addEndpoint(APIDataPlane.class);
-                            serverContainer.addEndpoint(APILogStreamer.class);
-                        });
-
-                server.start();
-                this.jettyServer = server;   // assign so isStopped() can shut it down (no more leak)
-
-                logger.info("wsapi Jetty 12 server started on wss port " + wsPort
-                        + " (virtualThreads=" + (virtualThreads != null) + ")");
+                logger.info("wsapi Netty WebSocket server started on wss port " + wsPort);
 
                 pluginBuilder.setIsActive(true);
             }
@@ -254,9 +165,9 @@ public class Plugin implements PluginService {
 
         } catch (Exception ex) {
             if (logger != null) {
-                logger.error("isStarted() failed to start wsapi Jetty server", ex);
+                logger.error("isStarted() failed to start wsapi Netty server", ex);
             } else {
-                slog.error("isStarted() failed to start wsapi Jetty server", ex);
+                slog.error("isStarted() failed to start wsapi Netty server", ex);
             }
             return false;
         }
@@ -332,8 +243,8 @@ public class Plugin implements PluginService {
 
     @Override
     public boolean isStopped() {
-        Server server = this.jettyServer;
-        if (server != null && !server.isStopped()) {
+        NettyWsServer server = this.nettyServer;
+        if (server != null) {
             try {
                 server.stop();
             } catch (Exception ex) {
@@ -344,7 +255,7 @@ public class Plugin implements PluginService {
                 }
             }
         }
-        this.jettyServer = null;
+        this.nettyServer = null;
 
         if (pluginBuilder != null) {
             pluginBuilder.setExecutor(null);

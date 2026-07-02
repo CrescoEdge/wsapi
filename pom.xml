@@ -46,6 +46,8 @@
         <!-- jdk, encoding, plugin & OSGi API / gson versions inherited from cresco-parent -->
         <!-- Rebuilt on Jetty 12 (jakarta.servlet 6 / jakarta.websocket 2). Jetty 9.4 was EOL. -->
         <jetty.version>12.1.10</jetty.version>
+        <!-- Netty WebSocket transport (replacing Jetty). -->
+        <netty.version>4.2.2.Final</netty.version>
         <bouncycastle.version>1.78.1</bouncycastle.version>
     </properties>
 
@@ -91,6 +93,15 @@
             <artifactId>gson</artifactId>
         </dependency>
 
+        <!-- SLF4J: bootstrap-window fallback logger. Provided (the framework exports SLF4J 2.x via
+             Pax Logging); previously came in transitively through Jetty, now declared explicitly. -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <version>2.0.6</version>
+            <scope>provided</scope>
+        </dependency>
+
         <!-- Self-signed TLS keystore/cert generation for the wss connector (mints the
              identity-carrying cert). bcpkix (Java 8+ "jdk18on" build) pulls bcprov + bcutil
              transitively; the JDK has no public API to create an X.509 cert. -->
@@ -100,21 +111,17 @@
             <version>${bouncycastle.version}</version>
         </dependency>
 
-        <!-- Embedded Jetty 12 runtime: server + Jakarta Servlet + Jakarta WebSocket (server) -->
+        <!-- Netty WebSocket server (replaces Jetty 12). netty-codec-http = HTTP/1.1 + WebSocket
+             handlers; netty-handler = SslHandler. Pure-NIO transport, OSGi-embeddable. -->
         <dependency>
-            <groupId>org.eclipse.jetty</groupId>
-            <artifactId>jetty-server</artifactId>
-            <version>${jetty.version}</version>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-codec-http</artifactId>
+            <version>${netty.version}</version>
         </dependency>
         <dependency>
-            <groupId>org.eclipse.jetty.ee10</groupId>
-            <artifactId>jetty-ee10-servlet</artifactId>
-            <version>${jetty.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>org.eclipse.jetty.ee10.websocket</groupId>
-            <artifactId>jetty-ee10-websocket-jakarta-server</artifactId>
-            <version>${jetty.version}</version>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-handler</artifactId>
+            <version>${netty.version}</version>
         </dependency>
 
     </dependencies>
