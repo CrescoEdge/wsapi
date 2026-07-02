@@ -156,6 +156,10 @@ public class Plugin implements PluginService {
                 this.nettyServer = new NettyWsServer(pluginBuilder, wsPort, keyStorePath,
                         keystorePassword.toCharArray(), ioBuf);
                 this.nettyServer.start();
+                // let CONFIG 'nettuning' reach the live server tunables
+                if (this.executor instanceof PluginExecutor) {
+                    ((PluginExecutor) this.executor).setNettyServer(this.nettyServer);
+                }
 
                 logger.info("wsapi Netty WebSocket server started on wss port " + wsPort);
 

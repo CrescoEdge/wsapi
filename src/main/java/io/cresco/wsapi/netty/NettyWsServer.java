@@ -50,6 +50,13 @@ public class NettyWsServer {
     private EventLoopGroup workerGroup;
     private Channel serverChannel;
 
+    // Live, dynamically-tunable I/O sizes (seeded from config in start()). The controller AutoTuner
+    // pushes a 'nettuning' CONFIG message -> applyNetTuning; NEW connections read the current value in
+    // initChannel via ch.config(), so buffer/block sizes track the fabric tuning without a restart.
+    private final java.util.concurrent.atomic.AtomicInteger readChunkBytes = new java.util.concurrent.atomic.AtomicInteger(256 * 1024);
+    private final java.util.concurrent.atomic.AtomicInteger socketBufferBytes = new java.util.concurrent.atomic.AtomicInteger(4 * 1024 * 1024);
+    private final java.util.concurrent.atomic.AtomicInteger writeHighWaterBytes = new java.util.concurrent.atomic.AtomicInteger(2 * 1024 * 1024);
+
     public NettyWsServer(PluginBuilder plugin, int port, Path keyStorePath, char[] keyStorePassword, int ioBufferBytes) {
         this.plugin = plugin;
         this.logger = plugin.getLogger(NettyWsServer.class.getName(), CLogger.Level.Info);
@@ -109,22 +116,24 @@ public class NettyWsServer {
         // reads cap at 64KB -> the SslHandler decrypts only ~4 TLS records per socket read, adding
         // syscall/overhead on a bulk stream. Enlarge the max read so each read pulls a full
         // large-message worth of ciphertext, and bound the outbound buffer for egress backpressure.
-        int readMax = plugin.getConfig().getIntegerParam("wsapi_read_chunk_bytes", 256 * 1024);
-        int sockBuf = plugin.getConfig().getIntegerParam("wsapi_socket_buffer_bytes", 4 * 1024 * 1024);
-        int writeHigh = plugin.getConfig().getIntegerParam("wsapi_write_high_water_bytes", 2 * 1024 * 1024);
+        readChunkBytes.set(plugin.getConfig().getIntegerParam("wsapi_read_chunk_bytes", 256 * 1024));
+        socketBufferBytes.set(plugin.getConfig().getIntegerParam("wsapi_socket_buffer_bytes", 4 * 1024 * 1024));
+        writeHighWaterBytes.set(plugin.getConfig().getIntegerParam("wsapi_write_high_water_bytes", 2 * 1024 * 1024));
 
         ServerBootstrap b = new ServerBootstrap();
         b.group(bossGroup, workerGroup)
                 .channel(NioServerSocketChannel.class)
                 .option(ChannelOption.SO_BACKLOG, 128)
-                .childOption(ChannelOption.SO_RCVBUF, sockBuf)
-                .childOption(ChannelOption.SO_SNDBUF, sockBuf)
                 .childOption(ChannelOption.TCP_NODELAY, true)
-                .childOption(ChannelOption.RCVBUF_ALLOCATOR, new AdaptiveRecvByteBufAllocator(2048, 65536, readMax))
-                .childOption(ChannelOption.WRITE_BUFFER_WATER_MARK, new WriteBufferWaterMark(writeHigh / 2, writeHigh))
                 .childHandler(new ChannelInitializer<SocketChannel>() {
                     @Override
                     protected void initChannel(SocketChannel ch) {
+                        // apply the CURRENT live tunables per-connection (dynamic, no restart)
+                        int sockBuf = socketBufferBytes.get(), readMax = readChunkBytes.get(), writeHigh = writeHighWaterBytes.get();
+                        ch.config().setOption(ChannelOption.SO_RCVBUF, sockBuf);
+                        ch.config().setOption(ChannelOption.SO_SNDBUF, sockBuf);
+                        ch.config().setOption(ChannelOption.RCVBUF_ALLOCATOR, new AdaptiveRecvByteBufAllocator(2048, 65536, readMax));
+                        ch.config().setOption(ChannelOption.WRITE_BUFFER_WATER_MARK, new WriteBufferWaterMark(writeHigh / 2, writeHigh));
                         ChannelPipeline p = ch.pipeline();
                         SslHandler ssl = sslContext.newHandler(ch.alloc());
                         p.addLast("ssl", ssl);
@@ -137,6 +146,23 @@ public class NettyWsServer {
 
         serverChannel = b.bind(port).sync().channel();
         logger.info("wsapi Netty WebSocket server started on wss port " + port);
+    }
+
+    /**
+     * Apply a fabric-wide net-tuning update (from the controller AutoTuner's 'nettuning' CONFIG msg).
+     * NEW connections read these live in initChannel; existing channels keep their buffers (a socket's
+     * SO_RCVBUF can't meaningfully change mid-stream anyway).
+     */
+    public void applyNetTuning(java.util.Map<String, String> tuning) {
+        try {
+            if (tuning.containsKey("net_socket_buffer_bytes")) socketBufferBytes.set(Integer.parseInt(tuning.get("net_socket_buffer_bytes")));
+            if (tuning.containsKey("net_read_chunk_bytes")) readChunkBytes.set(Integer.parseInt(tuning.get("net_read_chunk_bytes")));
+            if (tuning.containsKey("net_write_high_water_bytes")) writeHighWaterBytes.set(Integer.parseInt(tuning.get("net_write_high_water_bytes")));
+            logger.info("applyNetTuning: sockBuf=" + socketBufferBytes.get() + " readChunk="
+                    + readChunkBytes.get() + " writeHi=" + writeHighWaterBytes.get());
+        } catch (Exception ex) {
+            logger.warn("applyNetTuning failed: " + ex.getMessage());
+        }
     }
 
     public void stop() {

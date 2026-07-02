@@ -9,14 +9,30 @@ public class PluginExecutor implements Executor {
 
     private PluginBuilder plugin;
     CLogger logger;
+    private volatile io.cresco.wsapi.netty.NettyWsServer nettyServer;
 
     public PluginExecutor(PluginBuilder pluginBuilder) {
         this.plugin = pluginBuilder;
         logger = plugin.getLogger(PluginExecutor.class.getName(),CLogger.Level.Info);
     }
 
+    /** Wired by Plugin after the server starts, so CONFIG nettuning can reach the live server tunables. */
+    public void setNettyServer(io.cresco.wsapi.netty.NettyWsServer nettyServer) {
+        this.nettyServer = nettyServer;
+    }
+
     @Override
     public MsgEvent executeCONFIG(MsgEvent incoming) {
+        try {
+            if ("nettuning".equals(incoming.getParam("action")) && nettyServer != null) {
+                // fabric-wide buffer/block-size tuning pushed by the controller AutoTuner
+                nettyServer.applyNetTuning(incoming.getParams());
+                incoming.setParam("status", "10");
+                return incoming;
+            }
+        } catch (Exception ex) {
+            logger.error("executeCONFIG nettuning error: " + ex.getMessage());
+        }
         return null;
     }
     @Override
