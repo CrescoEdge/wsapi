@@ -3,20 +3,24 @@ package io.cresco.wsapi.netty;
 import io.cresco.library.plugin.PluginBuilder;
 import io.cresco.library.utilities.CLogger;
 import io.netty.bootstrap.ServerBootstrap;
+import io.netty.channel.AdaptiveRecvByteBufAllocator;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.MultiThreadIoEventLoopGroup;
+import io.netty.channel.WriteBufferWaterMark;
 import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpServerCodec;
+import io.netty.handler.ssl.OpenSsl;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslHandler;
+import io.netty.handler.ssl.SslProvider;
 
 import javax.net.ssl.KeyManagerFactory;
 import java.nio.file.Path;
@@ -69,7 +73,26 @@ public class NettyWsServer {
         }
         KeyManagerFactory kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
         kmf.init(ks, keyStorePassword);
+
+        // TLS provider: default JDK (SSLEngine). Set wsapi_ssl_provider=OPENSSL to use the native
+        // BoringSSL provider (netty-tcnative) -- ~2-3x faster bulk crypto, the single-stream ceiling.
+        // Falls back to JDK (with a warning) if OPENSSL is requested but the native lib did not load,
+        // so a misconfig or a platform without the native classifier never breaks the server.
+        SslProvider provider = SslProvider.JDK;
+        String requested = plugin.getConfig().getStringParam("wsapi_ssl_provider", "JDK");
+        if ("OPENSSL".equalsIgnoreCase(requested)) {
+            if (OpenSsl.isAvailable()) {
+                provider = SslProvider.OPENSSL;
+                logger.info("wsapi TLS provider: OPENSSL (native BoringSSL)");
+            } else {
+                logger.warn("wsapi_ssl_provider=OPENSSL requested but native lib unavailable ("
+                        + OpenSsl.unavailabilityCause() + "); falling back to JDK");
+            }
+        } else {
+            logger.info("wsapi TLS provider: JDK");
+        }
         return SslContextBuilder.forServer(kmf)
+                .sslProvider(provider)
                 .protocols("TLSv1.3", "TLSv1.2")
                 .build();
     }
@@ -82,13 +105,23 @@ public class NettyWsServer {
         bossGroup = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
         workerGroup = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
 
+        // Read/socket tuning (configurable; defaults preserve behavior). Default Netty adaptive
+        // reads cap at 64KB -> the SslHandler decrypts only ~4 TLS records per socket read, adding
+        // syscall/overhead on a bulk stream. Enlarge the max read so each read pulls a full
+        // large-message worth of ciphertext, and bound the outbound buffer for egress backpressure.
+        int readMax = plugin.getConfig().getIntegerParam("wsapi_read_chunk_bytes", 256 * 1024);
+        int sockBuf = plugin.getConfig().getIntegerParam("wsapi_socket_buffer_bytes", 4 * 1024 * 1024);
+        int writeHigh = plugin.getConfig().getIntegerParam("wsapi_write_high_water_bytes", 2 * 1024 * 1024);
+
         ServerBootstrap b = new ServerBootstrap();
         b.group(bossGroup, workerGroup)
                 .channel(NioServerSocketChannel.class)
                 .option(ChannelOption.SO_BACKLOG, 128)
-                .childOption(ChannelOption.SO_RCVBUF, 4 * 1024 * 1024)
-                .childOption(ChannelOption.SO_SNDBUF, 4 * 1024 * 1024)
+                .childOption(ChannelOption.SO_RCVBUF, sockBuf)
+                .childOption(ChannelOption.SO_SNDBUF, sockBuf)
                 .childOption(ChannelOption.TCP_NODELAY, true)
+                .childOption(ChannelOption.RCVBUF_ALLOCATOR, new AdaptiveRecvByteBufAllocator(2048, 65536, readMax))
+                .childOption(ChannelOption.WRITE_BUFFER_WATER_MARK, new WriteBufferWaterMark(writeHigh / 2, writeHigh))
                 .childHandler(new ChannelInitializer<SocketChannel>() {
                     @Override
                     protected void initChannel(SocketChannel ch) {

@@ -40,6 +40,7 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
     private volatile boolean active = false;
     private volatile String listenerId;
     private volatile StreamInfo streamInfo;
+    private volatile int shard = 0;
     private Channel channel;
 
     public DataPlaneWsHandler(PluginBuilder plugin) {
@@ -66,7 +67,8 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
                     tm.setText(message);
                     tm.setStringProperty(streamInfo.getIdentKey(), streamInfo.getIdentId());
                     tm.setStringProperty(streamInfo.getIoTypeKey(), streamInfo.getInputId());
-                    plugin.getAgentService().getDataPlaneService().sendMessage(TopicType.GLOBAL, tm);
+                    plugin.getAgentService().getDataPlaneService().sendMessage(
+                            TopicType.GLOBAL, tm, jakarta.jms.DeliveryMode.NON_PERSISTENT, 0, 0, shard);
                 }
             } else if (frame instanceof BinaryWebSocketFrame) {
                 if (!active) return; // ignore data before handshake
@@ -77,7 +79,9 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
                 bm.writeBytes(b);
                 bm.setStringProperty(streamInfo.getIdentKey(), streamInfo.getIdentId());
                 bm.setStringProperty(streamInfo.getIoTypeKey(), streamInfo.getInputId());
-                plugin.getAgentService().getDataPlaneService().sendMessage(TopicType.GLOBAL, bm);
+                bm.setIntProperty("dp_bytes", b.length); // readable payload size for link throughput metrics
+                plugin.getAgentService().getDataPlaneService().sendMessage(
+                        TopicType.GLOBAL, bm, jakarta.jms.DeliveryMode.NON_PERSISTENT, 0, 0, shard);
             }
         } catch (Exception ex) {
             logger.error("DataPlaneWsHandler.channelRead0: " + ex.getMessage());
@@ -96,6 +100,10 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
         } else {
             si = new StreamInfo("netty", message);
         }
+
+        // Shard is derived from the stream ident -- the one key both the publishing endpoint and the
+        // subscribing endpoint share -- so both land on the same shard-topic (global.event.<shard>).
+        this.shard = plugin.getAgentService().getDataPlaneService().shardFor(si.getIdentId());
 
         Map<String, String> response = new java.util.HashMap<>();
         try {
@@ -148,7 +156,7 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
                     ? si.getStream_query()
                     : si.getIdentKey() + "='" + si.getIdentId() + "'";
             this.listenerId = plugin.getAgentService().getDataPlaneService()
-                    .addMessageListener(TopicType.GLOBAL, ml, streamQuery);
+                    .addMessageListener(TopicType.GLOBAL, ml, streamQuery, shard);
             si.setListenerId(listenerId);
             return true;
         } catch (Exception ex) {

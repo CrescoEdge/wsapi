@@ -124,6 +124,18 @@
             <version>${netty.version}</version>
         </dependency>
 
+        <!-- Native OpenSSL/BoringSSL TLS provider (netty-tcnative). The JDK SSLEngine is ~2-3x
+             slower than native for bulk crypto and is the single-stream dataplane ceiling. Enabled
+             only when wsapi_ssl_provider=OPENSSL AND the native lib loads; otherwise the code falls
+             back to the JDK provider, so this dep is inert by default. Static jar embeds the native
+             lib (extracted from the bundle classpath at runtime). classifier is host-arch specific. -->
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-tcnative-boringssl-static</artifactId>
+            <version>2.0.72.Final</version>
+            <classifier>osx-aarch_64</classifier>
+        </dependency>
+
     </dependencies>
 
     <build>
