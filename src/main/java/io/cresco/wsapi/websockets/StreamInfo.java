@@ -63,10 +63,6 @@ public class StreamInfo {
         return identKey;
     }
 
-    public void setIdentId(String identKey) {
-        this.identKey = identKey;
-    }
-
     public String getIdentId() {
         return identId;
     }
