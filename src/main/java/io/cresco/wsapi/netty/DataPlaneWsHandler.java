@@ -34,6 +34,12 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
     private static final Gson gson = new Gson();
     private static final Type MAP_TYPE = new TypeToken<Map<String, String>>() {}.getType();
 
+    // B-2 unified metrics: process-wide dataplane counters exposed via the wsapi MeasurementEngine
+    // (getmetrics). One wsapi plugin per JVM, so static aggregation across all handler instances is correct.
+    public static final java.util.concurrent.atomic.AtomicInteger ACTIVE_CONNECTIONS = new java.util.concurrent.atomic.AtomicInteger();
+    public static final java.util.concurrent.atomic.AtomicLong DATAPLANE_BYTES = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong DATAPLANE_MESSAGES = new java.util.concurrent.atomic.AtomicLong();
+
     private final PluginBuilder plugin;
     private final CLogger logger;
 
@@ -51,6 +57,7 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
     @Override
     public void channelActive(ChannelHandlerContext ctx) throws Exception {
         this.channel = ctx.channel();
+        ACTIVE_CONNECTIONS.incrementAndGet();
         super.channelActive(ctx);
     }
 
@@ -63,6 +70,8 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
                     handshake(ctx, message);
                 } else {
                     // data text -> broker
+                    DATAPLANE_BYTES.addAndGet(message.length());
+                    DATAPLANE_MESSAGES.incrementAndGet();
                     TextMessage tm = plugin.getAgentService().getDataPlaneService().createTextMessage();
                     tm.setText(message);
                     tm.setStringProperty(streamInfo.getIdentKey(), streamInfo.getIdentId());
@@ -80,6 +89,8 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
                 bm.setStringProperty(streamInfo.getIdentKey(), streamInfo.getIdentId());
                 bm.setStringProperty(streamInfo.getIoTypeKey(), streamInfo.getInputId());
                 bm.setIntProperty("dp_bytes", b.length); // readable payload size for link throughput metrics
+                DATAPLANE_BYTES.addAndGet(b.length);
+                DATAPLANE_MESSAGES.incrementAndGet();
                 plugin.getAgentService().getDataPlaneService().sendMessage(
                         TopicType.GLOBAL, bm, jakarta.jms.DeliveryMode.NON_PERSISTENT, 0, 0, shard);
             }
@@ -167,6 +178,7 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
 
     @Override
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+        ACTIVE_CONNECTIONS.updateAndGet(v -> v > 0 ? v - 1 : 0);
         if (listenerId != null) {
             try { plugin.getAgentService().getDataPlaneService().removeMessageListener(listenerId); } catch (Exception ignore) {}
         }
