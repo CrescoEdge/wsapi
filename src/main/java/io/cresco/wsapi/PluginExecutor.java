@@ -1,6 +1,7 @@
 package io.cresco.wsapi;
 
 import com.google.gson.Gson;
+import io.cresco.library.capability.*;
 import io.cresco.library.messaging.MsgEvent;
 import io.cresco.library.metrics.CMetric;
 import io.cresco.library.metrics.MeasurementEngine;
@@ -9,6 +10,30 @@ import io.cresco.library.plugin.PluginBuilder;
 import io.cresco.library.utilities.CLogger;
 import io.cresco.wsapi.netty.DataPlaneWsHandler;
 
+@CrescoCapabilities(namespace = "wsapi", target = "plugin",
+        routingParams = {"region", "agent", "pluginid"},
+        summary = "WebSocket API gateway: external clients connect over wss for control-plane RPC and dataplane streaming; exposes global location, live buffer tuning, and dataplane metrics.")
+@CrescoActions({
+    @CrescoAction(name = "nettuning", type = "CONFIG",
+        summary = "Apply fabric-wide network tuning (socket buffer / read-chunk / write-high-water) to the live Netty WebSocket server.",
+        why = "Pushed by the controller AutoTuner to adapt the wss server's I/O sizing under load; new connections pick up the values.",
+        returns = @CrescoReturn(name = "status", description = "10 on success")),
+    @CrescoAction(name = "globalinfo",
+        summary = "Return the global controller's region and agent identity.",
+        why = "Use to discover where the global controller lives for routing global-scoped calls.",
+        returns = {
+            @CrescoReturn(name = "global_region", description = "global controller region"),
+            @CrescoReturn(name = "global_agent", description = "global controller agent")
+        }),
+    @CrescoAction(name = "getmetrics",
+        summary = "Return wsapi dataplane metrics (active connections, bytes, messages) as MeasurementEngine gauges JSON.",
+        why = "Standard cross-bundle metrics contract; folded into getmetricinventory.",
+        returns = @CrescoReturn(name = "metrics", type = "object", description = "getAllMetrics() JSON")),
+    @CrescoAction(name = "getcapabilities",
+        summary = "Return this plugin's self-describing capability document (its message actions as LLM tool specs).",
+        why = "Discovery: lets a client/LLM learn what this plugin can do and how to call it.",
+        returns = @CrescoReturn(name = "capabilities", type = "object", description = "CapabilityDocument JSON"))
+})
 public class PluginExecutor implements Executor {
 
     private PluginBuilder plugin;
@@ -86,6 +111,9 @@ public class PluginExecutor implements Executor {
                 ce.setParam("metrics", getMetricsJson());
                 ce.setParam("status", "10");
                 return ce;
+
+            case "getcapabilities":
+                return CapabilityResponder.respond(ce, this);
 
             default:
                 logger.error("Unknown configtype found {} for {}:", ce.getParam("action"), ce.getMsgType().toString());
