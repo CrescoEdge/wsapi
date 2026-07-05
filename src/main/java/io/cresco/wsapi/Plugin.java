@@ -21,7 +21,9 @@ import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 
 import io.cresco.wsapi.netty.NettyWsServer;
 
+import org.apache.felix.hc.api.HealthCheck;
 import org.osgi.framework.BundleContext;
+import org.osgi.framework.ServiceRegistration;
 import org.osgi.service.cm.ConfigurationAdmin;
 import org.osgi.service.component.annotations.*;
 
@@ -42,6 +44,8 @@ import java.security.cert.X509Certificate;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Date;
+import java.util.Dictionary;
+import java.util.Hashtable;
 import java.util.Map;
 
 
@@ -72,6 +76,8 @@ public class Plugin implements PluginService {
 
     // Assigned when the embedded Netty WebSocket server starts, so isStopped() can shut it down.
     private volatile NettyWsServer nettyServer;
+    // Felix HealthCheck registration (central health); best-effort, unregistered on stop
+    private ServiceRegistration<HealthCheck> healthReg;
 
     @Activate
     void activate(BundleContext context, Map<String,Object> map) {
@@ -164,6 +170,9 @@ public class Plugin implements PluginService {
                 logger.info("wsapi Netty WebSocket server started on wss port " + wsPort);
 
                 pluginBuilder.setIsActive(true);
+
+                // Register the central Felix HealthCheck (best-effort; must never break startup).
+                registerHealthCheck(wsPort);
             }
             return true;
 
@@ -245,8 +254,26 @@ public class Plugin implements PluginService {
         return value.length() > 64 ? value.substring(0, 64) : value;
     }
 
+    /** Register wsapi's Felix HealthCheck so CrescoHealthExecutor discovers it. Best-effort. */
+    private void registerHealthCheck(int wsPort) {
+        try {
+            Dictionary<String, Object> props = new Hashtable<>();
+            props.put(HealthCheck.NAME, "wsapi");
+            props.put(HealthCheck.TAGS, new String[]{"local"});
+            healthReg = context.registerService(HealthCheck.class,
+                    new WsapiHealthCheck(pluginBuilder, wsPort), props);
+            logger.info("Registered wsapi HealthCheck (Felix HC)");
+        } catch (Throwable t) {
+            // health is best-effort: a missing hc.api bundle must never break wsapi
+            if (logger != null) logger.warn("Could not register wsapi HealthCheck: " + t.getMessage());
+        }
+    }
+
     @Override
     public boolean isStopped() {
+        try {
+            if (healthReg != null) { healthReg.unregister(); healthReg = null; }
+        } catch (Exception ignore) { }
         NettyWsServer server = this.nettyServer;
         if (server != null) {
             try {
