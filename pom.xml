@@ -47,7 +47,7 @@
         <!-- Rebuilt on Jetty 12 (jakarta.servlet 6 / jakarta.websocket 2). Jetty 9.4 was EOL. -->
         <jetty.version>12.1.10</jetty.version>
         <!-- Netty WebSocket transport (replacing Jetty). -->
-        <netty.version>4.2.15.Final</netty.version>
+        <netty.version>4.2.16.Final</netty.version>
         <bouncycastle.version>1.84</bouncycastle.version>
     </properties>
 
