@@ -32,6 +32,13 @@ public class LogStreamerWsHandler extends SimpleChannelInboundHandler<WebSocketF
     private final CLogger logger;
     private final String logSessionId = UUID.randomUUID().toString();
     private volatile String listenerId;
+    // Tracks which agent this session has DP log streaming enabled on. A session must be enabled
+    // (setlogdp=true -> DataPlaneLogger.setIsEnabled) BEFORE setloglevel will take, and before any
+    // log line is mirrored to the dataplane. The original APILogStreamer did this on config; the
+    // netty port dropped it, so setloglevel returned status 9 and nothing ever streamed.
+    private volatile boolean dpEnabled = false;
+    private volatile String enabledRegion;
+    private volatile String enabledAgent;
 
     public LogStreamerWsHandler(PluginBuilder plugin) {
         this.plugin = plugin;
@@ -94,6 +101,19 @@ public class LogStreamerWsHandler extends SimpleChannelInboundHandler<WebSocketF
         if (sst.length != 4) return;
         try {
             String regionId = sst[0], agentId = sst[1], loglevel = sst[2], baseclass = sst[3];
+            // Enable dataplane log streaming for this session on the target agent before setting the
+            // level. If the client retargets a different agent on the same socket, disable the old one.
+            if (!dpEnabled || !agentId.equals(enabledAgent) || !regionId.equals(enabledRegion)) {
+                if (dpEnabled && enabledAgent != null) {
+                    setAgentLogDP(enabledRegion, enabledAgent, false);
+                    dpEnabled = false;
+                }
+                if (setAgentLogDP(regionId, agentId, true)) {
+                    dpEnabled = true;
+                    enabledRegion = regionId;
+                    enabledAgent = agentId;
+                }
+            }
             MsgEvent req = plugin.getGlobalAgentMsgEvent(MsgEvent.Type.CONFIG, regionId, agentId);
             req.setParam("action", "setloglevel");
             req.setParam("baseclassname", baseclass);
@@ -114,8 +134,32 @@ public class LogStreamerWsHandler extends SimpleChannelInboundHandler<WebSocketF
         }
     }
 
+    /**
+     * Enable/disable dataplane log streaming for this socket's session on a target agent via the
+     * agent {@code setlogdp} action (-> PluginAdmin.logDPSetEnabled -> DataPlaneLogger.setIsEnabled).
+     * Returns true on success (status_code 7).
+     */
+    private boolean setAgentLogDP(String regionId, String agentId, boolean isEnabled) {
+        try {
+            MsgEvent req = plugin.getGlobalAgentMsgEvent(MsgEvent.Type.CONFIG, regionId, agentId);
+            req.setParam("action", "setlogdp");
+            req.setParam("setlogdp", String.valueOf(isEnabled));
+            req.setParam("session_id", logSessionId);
+            MsgEvent resp = plugin.sendRPC(req);
+            return resp != null && resp.paramsContains("status_code") && "7".equals(resp.getParam("status_code"));
+        } catch (Exception ex) {
+            logger.error("LogStreamer.setAgentLogDP failed: " + ex.getMessage());
+            return false;
+        }
+    }
+
     @Override
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+        // Disable DP streaming for this session so the agent stops mirroring logs once nobody listens.
+        if (dpEnabled && enabledRegion != null) {
+            try { setAgentLogDP(enabledRegion, enabledAgent, false); } catch (Exception ignore) {}
+            dpEnabled = false;
+        }
         if (listenerId != null) {
             try { plugin.getAgentService().getDataPlaneService().removeMessageListener(listenerId); } catch (Exception ignore) {}
         }
