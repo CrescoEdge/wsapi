@@ -47,6 +47,9 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
     private volatile String listenerId;
     private volatile StreamInfo streamInfo;
     private volatile int shard = 0;
+    // frames dropped because the WS consumer fell behind (channel hit its write high-water mark)
+    private final java.util.concurrent.atomic.AtomicLong droppedFrames =
+            new java.util.concurrent.atomic.AtomicLong();
     private Channel channel;
 
     public DataPlaneWsHandler(PluginBuilder plugin) {
@@ -141,6 +144,19 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
                 @Override
                 public void onMessage(Message msg) {
                     try {
+                        // BACKPRESSURE: without this gate a slow/stalled WS consumer grew the
+                        // channel outbound buffer without bound (gateway OOM). The stream is
+                        // NON_PERSISTENT/lossy by design and the JMS session is shared with other
+                        // listeners (blocking here would stall them), so shed load instead: drop
+                        // frames while the channel is past its WRITE_BUFFER_WATER_MARK.
+                        if (!ch.isWritable()) {
+                            long dropped = droppedFrames.incrementAndGet();
+                            if (dropped == 1L || dropped % 1000L == 0L) {
+                                logger.warn("DataPlaneWsHandler: WS consumer not keeping up, dropped "
+                                        + dropped + " frames (channel unwritable)");
+                            }
+                            return;
+                        }
                         if (msg instanceof TextMessage) {
                             ch.writeAndFlush(new TextWebSocketFrame(((TextMessage) msg).getText()));
                         } else if (msg instanceof BytesMessage) {
@@ -174,6 +190,15 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
             logger.error("DataPlaneWsHandler.createListener failed: " + ex.getMessage());
             return false;
         }
+    }
+
+    @Override
+    public void channelWritabilityChanged(ChannelHandlerContext ctx) throws Exception {
+        if (ctx.channel().isWritable() && droppedFrames.get() > 0) {
+            logger.warn("DataPlaneWsHandler: WS channel writable again after dropping "
+                    + droppedFrames.getAndSet(0) + " frames");
+        }
+        super.channelWritabilityChanged(ctx);
     }
 
     @Override
