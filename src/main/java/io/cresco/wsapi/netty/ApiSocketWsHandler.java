@@ -12,6 +12,10 @@ import io.netty.handler.codec.http.websocketx.WebSocketFrame;
 
 import java.lang.reflect.Type;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Netty port of {@code APISocket} — MsgEvent RPC/emit bridge. Text frame carries
@@ -22,6 +26,23 @@ public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFra
 
     private static final Gson gson = new Gson();
     private static final Type TYPE = new TypeToken<Map<String, Map<String, String>>>() {}.getType();
+
+    // sendRPC blocks up to the RPC timeout (30s default); answering on the channel thread
+    // serializes every request behind the slowest one (one hung RPC head-of-line blocks the
+    // whole connection for its full timeout). RPCs are answered from this pool instead;
+    // under overload CallerRunsPolicy degrades gracefully to the old inline behavior.
+    // Responses may then complete out of order — clients either correlate replies
+    // (pycrescolib stamps client_rpc_id into the payload, echoed back by the controller)
+    // or issue one request at a time, which every sync client does.
+    private static final ExecutorService RPC_POOL = new ThreadPoolExecutor(
+            0, 64, 60L, TimeUnit.SECONDS,
+            new SynchronousQueue<>(),
+            r -> {
+                Thread t = new Thread(r, "wsapi-apisocket-rpc");
+                t.setDaemon(true);
+                return t;
+            },
+            new ThreadPoolExecutor.CallerRunsPolicy());
 
     private final PluginBuilder plugin;
     private final CLogger logger;
@@ -40,10 +61,16 @@ public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFra
             MsgEvent request = buildMsgEvent(incoming);
             boolean isRPC = Boolean.parseBoolean(incoming.get("message_info").get("is_rpc"));
             if (isRPC) {
-                MsgEvent response = plugin.sendRPC(request);
-                String r = (response == null) ? "{\"error\":\"Cresco rpc response was null\"}"
-                                               : gson.toJson(response.getParams());
-                ctx.writeAndFlush(new TextWebSocketFrame(r));
+                RPC_POOL.submit(() -> {
+                    try {
+                        MsgEvent response = plugin.sendRPC(request);
+                        String r = (response == null) ? "{\"error\":\"Cresco rpc response was null\"}"
+                                                       : gson.toJson(response.getParams());
+                        ctx.writeAndFlush(new TextWebSocketFrame(r));
+                    } catch (Exception ex) {
+                        logger.error("ApiSocketWsHandler rpc: " + ex.getMessage());
+                    }
+                });
             } else {
                 plugin.msgOut(request);
             }
