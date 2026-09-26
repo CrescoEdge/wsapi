@@ -120,8 +120,19 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
         this.shard = plugin.getAgentService().getDataPlaneService().shardFor(si.getIdentId());
 
         Map<String, String> response = new java.util.HashMap<>();
+        String selector;
         try {
-            if (createListener(ctx, si)) {
+            selector = StreamSelectors.selectorFor(si);
+        } catch (IllegalArgumentException refused) {
+            // a selector the client could shape would let it subscribe to other streams: refuse and hang up
+            logger.warn("DataPlaneWsHandler: handshake refused: " + refused.getMessage());
+            response.put("status_code", "9");
+            response.put("status_desc", "refused: " + refused.getMessage());
+            ctx.writeAndFlush(new TextWebSocketFrame(gson.toJson(response))).addListener(io.netty.channel.ChannelFutureListener.CLOSE);
+            return;
+        }
+        try {
+            if (createListener(ctx, si, selector)) {
                 this.streamInfo = si;
                 this.active = true;
                 response.put("status_code", "10");
@@ -137,7 +148,7 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
         ctx.writeAndFlush(new TextWebSocketFrame(gson.toJson(response)));
     }
 
-    private boolean createListener(ChannelHandlerContext ctx, StreamInfo si) {
+    private boolean createListener(ChannelHandlerContext ctx, StreamInfo si, String streamQuery) {
         try {
             final Channel ch = ctx.channel();
             MessageListener ml = new MessageListener() {
@@ -179,9 +190,6 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
                 }
             };
 
-            String streamQuery = (si.getStream_query() != null)
-                    ? si.getStream_query()
-                    : si.getIdentKey() + "='" + si.getIdentId() + "'";
             this.listenerId = plugin.getAgentService().getDataPlaneService()
                     .addMessageListener(TopicType.GLOBAL, ml, streamQuery, shard);
             si.setListenerId(listenerId);
