@@ -16,8 +16,12 @@ import java.util.regex.Pattern;
  *
  * <p>Allowed: an ident_key that is a plain identifier (not a JMS reserved word, not a JMS header),
  * an ident_id from a strict character set without quotes, and a raw stream_query of the form
- * {@code term (AND|OR term)*}, where a term is {@code ident = 'value'}, {@code ident <> 'value'} or
- * {@code ident IS [NOT] NULL}. No parentheses, LIKE, IN, BETWEEN, arithmetic or escaped quotes.
+ * {@code term (AND term)*}, where a term is {@code ident = 'value'}, {@code ident <> 'value'} or a
+ * bare boolean property {@code ident}, and at least one term is {@code ident = 'value'} with a
+ * non-empty value. A query can therefore only narrow one named stream or message type: OR,
+ * {@code IS [NOT] NULL} and a query of {@code <>} terms alone are refused, because each can match
+ * every message on the shard ({@code nonexistent IS NULL} selects everything). No parentheses, NOT,
+ * LIKE, IN, BETWEEN, arithmetic or escaped quotes.
  */
 public final class StreamSelectors {
 
@@ -59,26 +63,25 @@ public final class StreamSelectors {
         if (q.length() > MAX_QUERY) throw new IllegalArgumentException("stream_query longer than " + MAX_QUERY);
         List<String> t = tokens(q);
         int i = 0;
+        boolean anchored = false;
         for (;;) {
-            // term
+            // term: ident = 'v' | ident <> 'v' | ident (a boolean property)
             if (i >= t.size() || !identifier(t.get(i))) throw bad("an identifier", t, i);
             i++;
             if (i < t.size() && (t.get(i).equals("=") || t.get(i).equals("<>"))) {
+                boolean eq = t.get(i).equals("=");
                 i++;
                 if (i >= t.size() || !t.get(i).startsWith("'")) throw bad("a quoted value", t, i);
+                if (eq && t.get(i).length() > 2) anchored = true;
                 i++;
-            } else if (i < t.size() && t.get(i).equalsIgnoreCase("IS")) {
-                i++;
-                if (i < t.size() && t.get(i).equalsIgnoreCase("NOT")) i++;
-                if (i >= t.size() || !t.get(i).equalsIgnoreCase("NULL")) throw bad("NULL", t, i);
-                i++;
-            } else {
-                throw bad("=, <> or IS", t, i);
             }
-            if (i == t.size()) return;
-            if (!t.get(i).equalsIgnoreCase("AND") && !t.get(i).equalsIgnoreCase("OR")) throw bad("AND or OR", t, i);
+            if (i == t.size()) break;
+            if (!t.get(i).equalsIgnoreCase("AND")) throw bad("AND", t, i);
             i++;
         }
+        // Without one positive equality the query can match every message on the shard.
+        if (!anchored) throw new IllegalArgumentException("stream_query refused: it needs at least one ident = 'value' term, "
+                + "so it can only narrow a named stream or message type");
     }
 
     private static IllegalArgumentException bad(String expected, List<String> t, int i) {

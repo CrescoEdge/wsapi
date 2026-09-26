@@ -47,7 +47,8 @@ class StreamSelectorsTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"cresco_msg_type='stunnel_trace'", "cresco_msg_type='gfs_state'", "stream_name='a' and type='outgoing'",
-            "region_id IS NOT NULL", "a <> 'b' OR c IS NULL", "stream_name = 'x-1.y:z@h/p+q'", "t=''"})
+            "stream_name = 'x-1.y:z@h/p+q'", "filerepo_name='repo1' AND broadcast", "stream_name='a' AND type<>'incoming'",
+            "stream_name='a' AND t=''"})
     void rawQueriesInTheSafeGrammarAreAccepted(String q) {
         assertEquals(q, StreamSelectors.selectorFor(new StreamInfo("t", q)));
     }
@@ -60,10 +61,20 @@ class StreamSelectorsTest {
         assertThrows(IllegalArgumentException.class, () -> StreamSelectors.selectorFor(new StreamInfo("t", q)));
     }
 
+    /** The review's widening: no quote is ever closed, yet each of these selects every message on the shard. */
+    @ParameterizedTest
+    @ValueSource(strings = {"zz IS NULL", "nonexistent_prop IS NULL", "stream_id IS NOT NULL", "region_id IS NOT NULL",
+            "a='x' OR b IS NULL", "a='x' OR b='y'", "stream_name='mine' OR stream_name='theirs'", "a <> 'x'",
+            "a <> 'b' OR c IS NULL", "a <> 'x' AND flag", "broadcast", "t=''", "a='' AND b<>'x'"})
+    void aMatchAllOrWideningQueryIsRefused(String q) {
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> StreamSelectors.selectorFor(new StreamInfo("t", q)));
+        assertTrue(e.getMessage().startsWith("stream_query refused"), e.getMessage());
+    }
+
     @Test
     void anOversizedQueryIsRefused() {
         StringBuilder q = new StringBuilder("a='x'");
-        while (q.length() <= StreamSelectors.MAX_QUERY) q.append(" OR a='x'");
+        while (q.length() <= StreamSelectors.MAX_QUERY) q.append(" AND a='x'");
         assertThrows(IllegalArgumentException.class, () -> StreamSelectors.selectorFor(new StreamInfo("t", q.toString())));
     }
 
