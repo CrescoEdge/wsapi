@@ -61,15 +61,20 @@ public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFra
             MsgEvent request = buildMsgEvent(incoming);
             boolean isRPC = Boolean.parseBoolean(incoming.get("message_info").get("is_rpc"));
             if (isRPC) {
+                long timeoutMs = rpcTimeoutMs(incoming.get("message_info"));
+                Map<String, String> payload = incoming.get("message_payload");
                 RPC_POOL.submit(() -> {
+                    String r;
                     try {
-                        MsgEvent response = plugin.sendRPC(request);
-                        String r = (response == null) ? "{\"error\":\"Cresco rpc response was null\"}"
-                                                       : gson.toJson(response.getParams());
-                        ctx.writeAndFlush(new TextWebSocketFrame(r));
+                        MsgEvent response = timeoutMs > 0 ? plugin.sendRPC(request, timeoutMs) : plugin.sendRPC(request);
+                        r = (response == null) ? failure(payload, "504", "no reply within "
+                                + (timeoutMs > 0 ? timeoutMs : DEFAULT_RPC_TIMEOUT_MS) + " ms; the operation may still complete")
+                                : gson.toJson(response.getParams());
                     } catch (Exception ex) {
                         logger.error("ApiSocketWsHandler rpc: " + ex.getMessage());
+                        r = failure(payload, "500", "rpc failed: " + ex.getMessage());
                     }
+                    ctx.writeAndFlush(new TextWebSocketFrame(r));
                 });
             } else {
                 plugin.msgOut(request);
@@ -77,6 +82,36 @@ public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFra
         } catch (Exception ex) {
             logger.error("ApiSocketWsHandler: " + ex.getMessage());
         }
+    }
+
+    /** The library's own RPC timeout, used when a request names none. */
+    static final long DEFAULT_RPC_TIMEOUT_MS = 30_000L;
+    /** Longest per-request RPC timeout a client may ask for (message_info.rpc_timeout_ms). */
+    static final long MAX_RPC_TIMEOUT_MS = 3_600_000L;
+
+    /** The client's requested RPC timeout, clamped to [1 s, 1 h]; 0 means the library default. */
+    static long rpcTimeoutMs(Map<String, String> mi) {
+        String v = mi == null ? null : mi.get("rpc_timeout_ms");
+        if (v == null) return 0;
+        try {
+            return Math.max(1_000L, Math.min(MAX_RPC_TIMEOUT_MS, Long.parseLong(v.trim())));
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    /**
+     * A failed RPC still answers, and carries the request's params back like any reply: a client that
+     * correlates replies (pycrescolib's client_rpc_id) would otherwise discard it and wait out its own,
+     * possibly much longer, timeout.
+     */
+    static String failure(Map<String, String> payload, String status, String desc) {
+        Map<String, String> r = new java.util.LinkedHashMap<>();
+        if (payload != null) r.putAll(payload);
+        r.put("status", status);
+        r.put("status_desc", desc);
+        r.put("error", desc);
+        return gson.toJson(r);
     }
 
     private MsgEvent buildMsgEvent(Map<String, Map<String, String>> incoming) {
