@@ -45,7 +45,7 @@ public class WsRouter extends SimpleChannelInboundHandler<FullHttpRequest> {
         String expected = plugin.getConfig().getStringParam("cresco_service_key");
         if (expected == null) { deny(ctx, "Missing server-side cresco_service_key configuration"); return; }
         if (provided == null) { deny(ctx, "Missing cresco_service_key request header"); return; }
-        if (!expected.equals(provided)) { deny(ctx, "cresco_service_key mismatch"); return; }
+        if (!keyMatches(expected, provided)) { deny(ctx, "cresco_service_key mismatch"); return; }
 
         // --- route by path ---
         String uri = req.uri();
@@ -73,6 +73,13 @@ public class WsRouter extends SimpleChannelInboundHandler<FullHttpRequest> {
 
         // re-fire the (retained) request so WebSocketServerProtocolHandler performs the handshake
         ctx.fireChannelRead(req.retain());
+    }
+
+    /** Constant-time comparison: String.equals returns at the first differing character, which leaks how much of a guess was right. */
+    static boolean keyMatches(String expected, String provided) {
+        if (expected == null || provided == null) return false;
+        return java.security.MessageDigest.isEqual(expected.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                provided.getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
 
     private void deny(ChannelHandlerContext ctx, String msg) {
