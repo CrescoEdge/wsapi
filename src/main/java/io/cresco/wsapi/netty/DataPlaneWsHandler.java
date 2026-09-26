@@ -39,6 +39,11 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
     public static final java.util.concurrent.atomic.AtomicInteger ACTIVE_CONNECTIONS = new java.util.concurrent.atomic.AtomicInteger();
     public static final java.util.concurrent.atomic.AtomicLong DATAPLANE_BYTES = new java.util.concurrent.atomic.AtomicLong();
     public static final java.util.concurrent.atomic.AtomicLong DATAPLANE_MESSAGES = new java.util.concurrent.atomic.AtomicLong();
+    // Egress accounting (wsapi getmetrics -> wsapi.dataplane.egress.*): frames dropped because a consumer
+    // exceeded its backlog budget, bytes queued to consumers now, and the largest backlog one consumer reached.
+    public static final java.util.concurrent.atomic.AtomicLong EGRESS_DROPPED = EgressBudget.DROPPED;
+    public static final java.util.concurrent.atomic.AtomicLong EGRESS_PENDING_BYTES = EgressBudget.GLOBAL_PENDING;
+    public static final java.util.concurrent.atomic.AtomicLong EGRESS_MAX_PENDING_BYTES = EgressBudget.MAX_PENDING;
 
     private final PluginBuilder plugin;
     private final CLogger logger;
@@ -47,14 +52,42 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
     private volatile String listenerId;
     private volatile StreamInfo streamInfo;
     private volatile int shard = 0;
-    // frames dropped because the WS consumer fell behind (channel hit its write high-water mark)
+    // frames dropped in the current overload episode (reset, with a summary line, when the consumer drains)
     private final java.util.concurrent.atomic.AtomicLong droppedFrames =
             new java.util.concurrent.atomic.AtomicLong();
     private Channel channel;
+    // bounded egress backlog: frames queue past Netty's write high-water mark up to this consumer's byte
+    // budget; only a consumer beyond it (overloaded) has frames dropped, each counted and logged
+    private final EgressBudget egress;
+    private final long egressCap;
 
     public DataPlaneWsHandler(PluginBuilder plugin) {
         this.plugin = plugin;
         this.logger = plugin.getLogger(DataPlaneWsHandler.class.getName(), CLogger.Level.Info);
+        this.egressCap = plugin.getConfig().getLongParam("wsapi_dataplane_egress_buffer_bytes", 32L * 1024 * 1024);
+        this.egress = new EgressBudget(egressCap,
+                plugin.getConfig().getLongParam("wsapi_dataplane_egress_global_bytes", EgressBudget.defaultGlobalCap()));
+    }
+
+    /** Queues a frame to the consumer within its backlog budget; drops (counted, logged) past it. */
+    private void deliver(Channel ch, WebSocketFrame frame) {
+        final long size = frame.content().readableBytes();
+        if (!ch.isActive()) {                 // consumer gone; its listener is being removed
+            frame.release();
+            return;
+        }
+        if (!egress.tryAcquire(size)) {
+            frame.release();
+            long dropped = droppedFrames.incrementAndGet();
+            EGRESS_DROPPED.incrementAndGet();
+            if (dropped == 1L || dropped % 1000L == 0L) {
+                logger.warn("DataPlaneWsHandler: WS consumer overloaded: " + egress.pending() + " B queued (budget "
+                        + egressCap + " B), dropped " + dropped + " frame(s) (wsapi.dataplane.egress.dropped total="
+                        + EGRESS_DROPPED.get() + ")");
+            }
+            return;
+        }
+        ch.writeAndFlush(frame).addListener(f -> egress.release(size));
     }
 
     @Override
@@ -155,21 +188,16 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
                 @Override
                 public void onMessage(Message msg) {
                     try {
-                        // BACKPRESSURE: without this gate a slow/stalled WS consumer grew the
-                        // channel outbound buffer without bound (gateway OOM). The stream is
-                        // NON_PERSISTENT/lossy by design and the JMS session is shared with other
-                        // listeners (blocking here would stall them), so shed load instead: drop
-                        // frames while the channel is past its WRITE_BUFFER_WATER_MARK.
-                        if (!ch.isWritable()) {
-                            long dropped = droppedFrames.incrementAndGet();
-                            if (dropped == 1L || dropped % 1000L == 0L) {
-                                logger.warn("DataPlaneWsHandler: WS consumer not keeping up, dropped "
-                                        + dropped + " frames (channel unwritable)");
-                            }
-                            return;
-                        }
+                        // EGRESS: the JMS session is shared with every other dataplane listener on this
+                        // agent, so this never blocks. Frames used to be dropped as soon as the channel
+                        // passed its 2 MiB write high-water mark, i.e. eight 256 KiB frames: a burst that
+                        // outran the consumer by a few milliseconds lost frames (2026-09-26, 2-node, 800 x
+                        // 256 KiB: 4 of 70 runs lost 1-8 frames, mostly the first run after a cold start).
+                        // Now they queue within a per-consumer byte budget (EgressBudget) and only an
+                        // overloaded consumer loses frames, each one counted.
                         if (msg instanceof TextMessage) {
-                            ch.writeAndFlush(new TextWebSocketFrame(((TextMessage) msg).getText()));
+                            deliver(ch, new TextWebSocketFrame(Unpooled.copiedBuffer(((TextMessage) msg).getText(),
+                                    java.nio.charset.StandardCharsets.UTF_8)));
                         } else if (msg instanceof BytesMessage) {
                             String transferId = msg.getStringProperty("transfer_id");
                             long dataSize = ((BytesMessage) msg).getBodyLength();
@@ -182,7 +210,7 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
                             if (transferId != null) {
                                 bytes = Bytes.concat(transferId.getBytes(), bytes);
                             }
-                            ch.writeAndFlush(new BinaryWebSocketFrame(Unpooled.wrappedBuffer(bytes)));
+                            deliver(ch, new BinaryWebSocketFrame(Unpooled.wrappedBuffer(bytes)));
                         }
                     } catch (Exception ex) {
                         logger.error("DataPlaneWsHandler listener.onMessage failed: " + ex.getMessage());
@@ -203,8 +231,8 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
     @Override
     public void channelWritabilityChanged(ChannelHandlerContext ctx) throws Exception {
         if (ctx.channel().isWritable() && droppedFrames.get() > 0) {
-            logger.warn("DataPlaneWsHandler: WS channel writable again after dropping "
-                    + droppedFrames.getAndSet(0) + " frames");
+            logger.warn("DataPlaneWsHandler: WS consumer drained after dropping "
+                    + droppedFrames.getAndSet(0) + " frames (wsapi.dataplane.egress.dropped total=" + EGRESS_DROPPED.get() + ")");
         }
         super.channelWritabilityChanged(ctx);
     }

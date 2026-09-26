@@ -26,7 +26,7 @@ import io.cresco.wsapi.netty.DataPlaneWsHandler;
             @CrescoReturn(name = "global_agent", description = "global controller agent")
         }),
     @CrescoAction(name = "getmetrics",
-        summary = "Return wsapi dataplane metrics (active connections, bytes, messages) as MeasurementEngine gauges JSON.",
+        summary = "Return wsapi dataplane metrics (active connections, bytes, messages, egress drops and backlog) as MeasurementEngine gauges JSON.",
         why = "Standard cross-bundle metrics contract; folded into getmetricinventory.",
         returns = @CrescoReturn(name = "metrics", type = "object", description = "getAllMetrics() JSON")),
     @CrescoAction(name = "getcapabilities",
@@ -56,10 +56,17 @@ public class PluginExecutor implements Executor {
                 metricEngine.setGauge("wsapi.dataplane.connections", "active dataplane WebSocket connections", "wsapi", CMetric.MeasureClass.GAUGE_INT);
                 metricEngine.setGauge("wsapi.dataplane.bytes", "total dataplane bytes ingested", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
                 metricEngine.setGauge("wsapi.dataplane.messages", "total dataplane messages ingested", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
+                // no silent egress loss: every frame not delivered to a WS consumer is counted here
+                metricEngine.setGauge("wsapi.dataplane.egress.dropped", "dataplane frames dropped at WS egress: a consumer more than wsapi_dataplane_egress_buffer_bytes behind (total since start)", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
+                metricEngine.setGauge("wsapi.dataplane.egress.pending.bytes", "dataplane bytes queued to WS consumers, not yet written", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
+                metricEngine.setGauge("wsapi.dataplane.egress.max.pending.bytes", "largest egress backlog one WS consumer reached since start (bytes)", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
             }
             metricEngine.updateIntGauge("wsapi.dataplane.connections", DataPlaneWsHandler.ACTIVE_CONNECTIONS.get());
             metricEngine.updateLongGauge("wsapi.dataplane.bytes", DataPlaneWsHandler.DATAPLANE_BYTES.get());
             metricEngine.updateLongGauge("wsapi.dataplane.messages", DataPlaneWsHandler.DATAPLANE_MESSAGES.get());
+            metricEngine.updateLongGauge("wsapi.dataplane.egress.dropped", DataPlaneWsHandler.EGRESS_DROPPED.get());
+            metricEngine.updateLongGauge("wsapi.dataplane.egress.pending.bytes", DataPlaneWsHandler.EGRESS_PENDING_BYTES.get());
+            metricEngine.updateLongGauge("wsapi.dataplane.egress.max.pending.bytes", DataPlaneWsHandler.EGRESS_MAX_PENDING_BYTES.get());
             return gson.toJson(metricEngine.getAllMetrics());
         } catch (Exception ex) {
             logger.error("getMetricsJson() " + ex.getMessage());
