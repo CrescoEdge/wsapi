@@ -103,11 +103,13 @@ public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFra
     /**
      * A failed RPC still answers, and carries the request's params back like any reply: a client that
      * correlates replies (pycrescolib's client_rpc_id) would otherwise discard it and wait out its own,
-     * possibly much longer, timeout.
+     * possibly much longer, timeout. Only small, non-secret params come back ({@link FailureEcho}): the
+     * reply must fit a client frame and must not repeat a secret.
      */
     static String failure(Map<String, String> payload, String status, String desc) {
-        Map<String, String> r = new java.util.LinkedHashMap<>();
-        if (payload != null) r.putAll(payload);
+        Map<String, String> r = FailureEcho.params(payload);
+        desc = FailureEcho.redactText(desc);
+        if (desc != null && desc.length() > FailureEcho.MAX_VALUE_BYTES) desc = desc.substring(0, FailureEcho.MAX_VALUE_BYTES) + "...";
         r.put("status", status);
         r.put("status_desc", desc);
         r.put("error", desc);
