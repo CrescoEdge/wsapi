@@ -21,7 +21,8 @@ import java.util.regex.Pattern;
  *       {@link #MAX_VALUE_BYTES} are replaced by a marker naming their size.</li>
  *   <li>Echoed values are capped at {@link #MAX_TOTAL_BYTES} in total; past it, params are dropped and
  *       counted in {@code echo_omitted}. The correlation id goes first, so it always fits.</li>
- *   <li>Embedded secret-looking name=value parameters inside a kept value are redacted.</li>
+ *   <li>Embedded secret-looking name=value parameters inside a kept value are redacted; a plain-JSON
+ *       {@code configparams} has its secret keys redacted ({@link ReplyRedaction#redactJson}).</li>
  * </ul>
  */
 final class FailureEcho {
@@ -84,6 +85,7 @@ final class FailureEcho {
                 int n = v.getBytes(StandardCharsets.UTF_8).length;
                 if (isData(k, v)) e = "[omitted: data param, " + n + " bytes]";
                 else if (n > MAX_VALUE_BYTES) e = "[omitted: " + n + " bytes, over the " + MAX_VALUE_BYTES + "-byte echo cap]";
+                else if (ReplyRedaction.CONFIG.equals(k)) e = ReplyRedaction.redactJson(v);   // plain-JSON plugin config
                 else e = redactText(v);
             }
             int cost = k.length() + (e == null ? 4 : e.getBytes(StandardCharsets.UTF_8).length);
