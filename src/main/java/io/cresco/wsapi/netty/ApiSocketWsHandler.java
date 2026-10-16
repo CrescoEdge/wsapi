@@ -69,7 +69,7 @@ public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFra
                         MsgEvent response = timeoutMs > 0 ? plugin.sendRPC(request, timeoutMs) : plugin.sendRPC(request);
                         r = (response == null) ? failure(payload, "504", "no reply within "
                                 + (timeoutMs > 0 ? timeoutMs : DEFAULT_RPC_TIMEOUT_MS) + " ms; the operation may still complete")
-                                : gson.toJson(response.getParams());
+                                : success(response);
                     } catch (Exception ex) {
                         logger.error("ApiSocketWsHandler rpc: " + ex.getMessage());
                         r = failure(payload, "500", "rpc failed: " + ex.getMessage());
@@ -98,6 +98,11 @@ public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFra
         } catch (NumberFormatException e) {
             return 0;
         }
+    }
+
+    /** A reply as sent to the client: its params, with any plugin config it carries redacted ({@link ReplyRedaction}). */
+    static String success(MsgEvent response) {
+        return gson.toJson(ReplyRedaction.redact(response).getParams());
     }
 
     /**
