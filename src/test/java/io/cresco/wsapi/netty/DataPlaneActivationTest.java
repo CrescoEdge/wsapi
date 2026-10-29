@@ -26,4 +26,18 @@ class DataPlaneActivationTest {
         assertEquals("9", DataPlaneWsHandler.activationReply(() -> false).get("status_code"));
         assertEquals("90", DataPlaneWsHandler.activationReply(() -> { throw new IllegalStateException("boom"); }).get("status_code"));
     }
+
+    @Test
+    void aSubscriptionRefusedOnReconnectClosesTheStreamWithTheReason() {
+        io.netty.channel.embedded.EmbeddedChannel ch = new io.netty.channel.embedded.EmbeddedChannel();
+        DataPlaneWsHandler.closeRefused(ch, "Cresco stream policy: subscription to 'global.event' denied (" + "x".repeat(300) + ")");
+        Object out = ch.readOutbound();
+        assertTrue(out instanceof io.netty.handler.codec.http.websocketx.CloseWebSocketFrame, String.valueOf(out));
+        io.netty.handler.codec.http.websocketx.CloseWebSocketFrame close = (io.netty.handler.codec.http.websocketx.CloseWebSocketFrame) out;
+        assertEquals(1008, close.statusCode());
+        assertTrue(close.reasonText().startsWith("Subscription refused: Cresco stream policy"));
+        assertTrue(close.reasonText().getBytes(java.nio.charset.StandardCharsets.UTF_8).length <= 123);
+        assertTrue(!ch.isOpen(), "the stream was not closed");
+        close.release();
+    }
 }
