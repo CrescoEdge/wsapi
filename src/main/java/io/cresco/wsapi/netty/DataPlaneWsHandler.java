@@ -179,6 +179,21 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
         ctx.writeAndFlush(new TextWebSocketFrame(gson.toJson(response)));
     }
 
+    /**
+     * A dataplane listener that is also told (JMS ExceptionListener) when the controller cannot restore its subscription
+     * after a reconnect because the broker refused it.
+     */
+    interface RefusalAwareListener extends MessageListener, jakarta.jms.ExceptionListener { }
+
+    /** Close a client's stream because its subscription was refused: WebSocket close 1008 (policy violation) with the reason. */
+    static void closeRefused(Channel ch, String reason) {
+        String r = "Subscription refused: " + (reason == null ? "" : reason);
+        byte[] b = r.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        if (b.length > 123) r = new String(java.util.Arrays.copyOf(b, 120), java.nio.charset.StandardCharsets.UTF_8) + "...";
+        ch.writeAndFlush(new io.netty.handler.codec.http.websocketx.CloseWebSocketFrame(1008, r))
+                .addListener(io.netty.channel.ChannelFutureListener.CLOSE);
+    }
+
     /** Activation reply: the listener is active. */
     public static final String STATUS_ACTIVE = "10";
     /**
@@ -213,7 +228,15 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
     private boolean createListener(ChannelHandlerContext ctx, StreamInfo si, String streamQuery) {
         try {
             final Channel ch = ctx.channel();
-            MessageListener ml = new MessageListener() {
+            MessageListener ml = new RefusalAwareListener() {
+                @Override
+                public void onException(jakarta.jms.JMSException refused) {
+                    // the controller could not restore this subscription after a reconnect (the broker refused it):
+                    // close the stream; the client reconnects and its activation reply says why
+                    active = false;
+                    closeRefused(ch, refused.getMessage());
+                }
+
                 @Override
                 public void onMessage(Message msg) {
                     try {
