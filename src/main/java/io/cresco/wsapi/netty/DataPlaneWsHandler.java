@@ -164,21 +164,50 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
             ctx.writeAndFlush(new TextWebSocketFrame(gson.toJson(response))).addListener(io.netty.channel.ChannelFutureListener.CLOSE);
             return;
         }
-        try {
-            if (createListener(ctx, si, selector)) {
-                this.streamInfo = si;
-                this.active = true;
-                response.put("status_code", "10");
-                response.put("status_desc", "Listener Active");
-            } else {
-                response.put("status_code", "9");
-                response.put("status_desc", "Could not activate listener");
-            }
-        } catch (Exception ex) {
-            response.put("status_code", "90");
-            response.put("status_desc", ex.getMessage());
+        response.putAll(activationReply(() -> createListener(ctx, si, selector)));
+        String code = response.get("status_code");
+        if (STATUS_ACTIVE.equals(code) || STATUS_SUBSCRIPTION_REFUSED.equals(code)) {
+            // a refused subscription still leaves the stream usable for sending (the client may be a pure sender
+            // of a stream bound to someone else); the client decides whether a refusal is an error for it
+            this.streamInfo = si;
+            this.active = true;
+        }
+        if (STATUS_SUBSCRIPTION_REFUSED.equals(code)) {
+            logger.warn("DataPlaneWsHandler: the broker refused this client's subscription (" + selector + "): "
+                    + response.get("status_desc") + " -- the stream stays open for sending");
         }
         ctx.writeAndFlush(new TextWebSocketFrame(gson.toJson(response)));
+    }
+
+    /** Activation reply: the listener is active. */
+    public static final String STATUS_ACTIVE = "10";
+    /**
+     * Activation reply: the broker refused the subscription by policy (tenant isolation, or a stream bound to another
+     * recipient with cresco_to). The connection stays open for sending; {@code status_desc} carries the broker's reason
+     * and {@code subscription} is {@code refused}.
+     */
+    public static final String STATUS_SUBSCRIPTION_REFUSED = "40";
+
+    /** The activation reply for one attempt to create the dataplane listener. */
+    static Map<String, String> activationReply(java.util.concurrent.Callable<Boolean> createListener) {
+        Map<String, String> r = new java.util.HashMap<>();
+        try {
+            if (Boolean.TRUE.equals(createListener.call())) {
+                r.put("status_code", STATUS_ACTIVE);
+                r.put("status_desc", "Listener Active");
+            } else {
+                r.put("status_code", "9");
+                r.put("status_desc", "Could not activate listener");
+            }
+        } catch (SecurityException refused) {
+            r.put("status_code", STATUS_SUBSCRIPTION_REFUSED);
+            r.put("status_desc", "Subscription refused: " + refused.getMessage());
+            r.put("subscription", "refused");
+        } catch (Exception ex) {
+            r.put("status_code", "90");
+            r.put("status_desc", String.valueOf(ex.getMessage()));
+        }
+        return r;
     }
 
     private boolean createListener(ChannelHandlerContext ctx, StreamInfo si, String streamQuery) {
@@ -221,7 +250,9 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
             this.listenerId = plugin.getAgentService().getDataPlaneService()
                     .addMessageListener(TopicType.GLOBAL, ml, streamQuery, shard);
             si.setListenerId(listenerId);
-            return true;
+            return listenerId != null;
+        } catch (SecurityException refused) {
+            throw refused;                                   // the broker refused it: reported to the client as such
         } catch (Exception ex) {
             logger.error("DataPlaneWsHandler.createListener failed: " + ex.getMessage());
             return false;
