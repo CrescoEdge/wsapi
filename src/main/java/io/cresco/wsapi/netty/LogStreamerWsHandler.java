@@ -76,6 +76,29 @@ public class LogStreamerWsHandler extends SimpleChannelInboundHandler<WebSocketF
         CONFIG_POOL.allowCoreThreadTimeOut(true);
     }
 
+    /**
+     * Undoing a closed stream's log streaming ({@code setlogdp=false} at every agent it turned it on at) runs here, never on
+     * the configuration pool's callers' threads nor the common ForkJoin pool: each undo RPC may wait {@link
+     * #CONFIG_RPC_TIMEOUT_MS} for its agent, and the common pool (which a full configuration pool used to fall back to) is
+     * shared by the whole JVM and sized for computation, not for blocking calls. Bounded: {@value #UNDO_THREADS} threads and
+     * {@value #UNDO_QUEUE} closed streams waiting (each stream queues one undo, at most once); beyond that an undo is not
+     * run, and an ERROR names the agents left streaming to nobody (counted in {@link #UNDO_DROPPED}).
+     */
+    static final int UNDO_THREADS = 4;
+    static final int UNDO_QUEUE = 4096;
+    static final java.util.concurrent.ThreadPoolExecutor UNDO_POOL = new java.util.concurrent.ThreadPoolExecutor(UNDO_THREADS,
+            UNDO_THREADS, 60L, java.util.concurrent.TimeUnit.SECONDS, new java.util.concurrent.ArrayBlockingQueue<>(UNDO_QUEUE), r -> {
+                Thread t = new Thread(r, "wsapi-logstream-undo");
+                t.setDaemon(true);
+                return t;
+            }, new java.util.concurrent.ThreadPoolExecutor.AbortPolicy());
+    /** Undos that could not be queued (the undo pool was full), since start. */
+    static final java.util.concurrent.atomic.AtomicLong UNDO_DROPPED = new java.util.concurrent.atomic.AtomicLong();
+
+    static {
+        UNDO_POOL.allowCoreThreadTimeOut(true);
+    }
+
     /** One configuration at a time per log stream. */
     private final java.util.concurrent.atomic.AtomicBoolean configuring = new java.util.concurrent.atomic.AtomicBoolean();
     /** Configuration tasks an admin may hold on the pool at a time, across its streams (a fair share of it). */
@@ -186,7 +209,7 @@ public class LogStreamerWsHandler extends SimpleChannelInboundHandler<WebSocketF
         }
     }
 
-    /** Turn log streaming off on every agent this stream turned it on at, once (on the pool; never on an event loop). */
+    /** Turn log streaming off on every agent this stream turned it on at, once (on {@link #UNDO_POOL}; never on an event loop). */
     private void undoOnce() {
         if (!undone.compareAndSet(false, true)) return;
         dpEnabled = false;
@@ -198,9 +221,12 @@ public class LogStreamerWsHandler extends SimpleChannelInboundHandler<WebSocketF
             }
         };
         try {
-            CONFIG_POOL.execute(undo);
+            UNDO_POOL.execute(undo);
         } catch (java.util.concurrent.RejectedExecutionException full) {
-            java.util.concurrent.CompletableFuture.runAsync(undo);   // never leave an agent mirroring to nobody
+            UNDO_DROPPED.incrementAndGet();
+            logger.error("LogStreamerWsHandler: " + UNDO_QUEUE + " closed log streams are already waiting to turn log streaming "
+                    + "off; it stays on, mirroring to nobody, at " + touched + " (session " + logSessionId + ") until a log stream "
+                    + "turns it off there or the agent restarts");
         }
     }
 
