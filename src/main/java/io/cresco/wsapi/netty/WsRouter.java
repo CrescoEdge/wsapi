@@ -77,6 +77,19 @@ public class WsRouter extends SimpleChannelInboundHandler<FullHttpRequest> {
 
         /** This server's log-stream configuration and undo pools; shut down with it. */
         final LogStreamPools logStreams = new LogStreamPools();
+        /** Inbound message bytes held, per caller and in total ({@link InboundBudget}). */
+        final InboundBudget inbound = new InboundBudget();
+
+        /**
+         * Bound the inbound message bytes held in memory: per caller, all its connections together
+         * ({@code wsapi_max_inflight_bytes_per_user}), and in total ({@code wsapi_max_inflight_bytes}).
+         */
+        public Gate inboundBounds(long perCaller, long total) {
+            inbound.bounds(perCaller, total);
+            return this;
+        }
+
+        public InboundBudget inbound() { return inbound; }
 
         public Gate(Authenticator authenticator, ApiGateway gateway, int threads, int queue, CLogger logger) {
             this.authenticator = authenticator;
@@ -451,8 +464,13 @@ public class WsRouter extends SimpleChannelInboundHandler<FullHttpRequest> {
                     .allowExtensions(false)          // permessage-deflate stays OFF
                     .build();
 
+            // inbound bytes are counted as they arrive (right after TLS) and given back once a whole message is handled
+            io.netty.channel.ChannelInboundHandlerAdapter[] budget = gate.inbound.handlers(p);
+            if (ctx.pipeline().get("ssl") != null) ctx.pipeline().addAfter("ssl", "inbound-budget", budget[0]);
+            else ctx.pipeline().addFirst("inbound-budget", budget[0]);
             ctx.pipeline().addLast(new WebSocketServerProtocolHandler(cfg));
             ctx.pipeline().addLast(new CappedFrameAggregator(cap, capKey)); // whole-message delivery, the same cap
+            ctx.pipeline().addLast("inbound-release", budget[1]);
             ctx.pipeline().addLast(endpoint);
             ctx.pipeline().remove(this); // router done; hand the upgrade to the protocol handler
 
@@ -461,6 +479,12 @@ public class WsRouter extends SimpleChannelInboundHandler<FullHttpRequest> {
         } finally {
             req.release();
         }
+    }
+
+    /** The largest message any endpoint accepts (its cap): a caller's in-flight bound must hold at least one. */
+    public static int largestMessageCap(PluginBuilder plugin) {
+        return Math.max(maxMessageBytes(plugin, DATAPLANE_PATH), Math.max(maxMessageBytes(plugin, APISOCKET_PATH),
+                maxMessageBytes(plugin, LOGSTREAMER_PATH)));
     }
 
     /** The config key of an endpoint's message cap. */
