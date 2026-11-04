@@ -148,12 +148,6 @@ public class Plugin implements PluginService {
                 String usersFile = cfg.getStringParam("wsapi_users_file");
                 CredentialFile users = new CredentialFile(usersFile != null ? Paths.get(usersFile) : dataDir.resolve("ws.users"),
                         logger, System::currentTimeMillis);
-                boolean serviceKeyEnabled = cfg.getBooleanParam("wsapi_service_key_enabled", true);
-                if (!serviceKeyEnabled) {
-                    logger.info("wsapi service key authentication is disabled (wsapi_service_key_enabled=false)");
-                } else if (cfg.getStringParam("cresco_service_key") == null) {
-                    logger.info("wsapi: no cresco_service_key configured; only per-user credentials from " + users.path() + " can log in");
-                }
                 AuthRateLimiter limiter = new AuthRateLimiter(
                         cfg.getIntegerParam("wsapi_auth_max_failures", 10),
                         cfg.getIntegerParam("wsapi_auth_max_user_failures", 50),
@@ -168,8 +162,24 @@ public class Plugin implements PluginService {
                         1000L * cfg.getIntegerParam("wsapi_auth_cache_seconds", 300), System::currentTimeMillis);
                 int authThreads = cfg.getIntegerParam("wsapi_auth_threads",
                         Math.max(2, Math.min(8, Runtime.getRuntime().availableProcessors() / 2)));
+                String keyProblem = authenticator.serviceKeyProblem();
+                if (keyProblem == null) {
+                    logger.info("wsapi service key authentication is enabled");
+                } else if (keyProblem.contains("too weak")) {
+                    logger.error("wsapi: " + keyProblem + "; set a random key of at least 128 bits (e.g. openssl rand -hex 32), "
+                            + "or use per-user credentials from " + users.path());
+                } else {
+                    logger.info("wsapi: " + keyProblem + "; only per-user credentials from " + users.path() + " can log in");
+                }
+                List<String> origins = new ArrayList<>();
+                String originCsv = cfg.getStringParam("wsapi_allowed_origins");
+                if (originCsv != null) for (String o : originCsv.split(",")) if (!o.isBlank()) origins.add(o.trim());
                 WsRouter.Gate gate = new WsRouter.Gate(authenticator, apiGateway(), authThreads,
-                        cfg.getIntegerParam("wsapi_auth_queue", 256), logger);
+                        cfg.getIntegerParam("wsapi_auth_queue", 256), logger)
+                        .limits(cfg.getIntegerParam("wsapi_auth_pending_per_source", 2),
+                                cfg.getIntegerParam("wsapi_max_connections_per_user", 64),
+                                cfg.getIntegerParam("wsapi_max_connections_per_admin", 256),
+                                origins);
 
                 // --- Netty WebSocket server (replaces Jetty). One wss listener serves all three
                 //     endpoints; every upgrade authenticated; permessage-deflate off; whole-message frame aggregation. ---
@@ -216,6 +226,7 @@ public class Plugin implements PluginService {
                 .rsaBits(cfg.getIntegerParam("wsapi_tls_rsa_bits", 3072))
                 .validityDays(cfg.getIntegerParam("wsapi_tls_validity_days", 730))
                 .replaceNonCompliant(cfg.getBooleanParam("wsapi_tls_replace_noncompliant", false))
+                .keepLegacy(cfg.getBooleanParam("wsapi_tls_keep_legacy_keystore", false))
                 .extraSans(sans)
                 .identity(pluginBuilder.getRegion(), pluginBuilder.getAgent(), pluginBuilder.getPluginID());
     }

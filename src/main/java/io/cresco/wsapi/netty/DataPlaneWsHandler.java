@@ -22,6 +22,7 @@ import jakarta.jms.MessageListener;
 import jakarta.jms.TextMessage;
 
 import java.lang.reflect.Type;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -119,6 +120,7 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
                     tm.setText(message);
                     tm.setStringProperty(streamInfo.getIdentKey(), streamInfo.getIdentId());
                     tm.setStringProperty(streamInfo.getIoTypeKey(), streamInfo.getInputId());
+                    stampWriter(tm);
                     plugin.getAgentService().getDataPlaneService().sendMessage(
                             TopicType.GLOBAL, tm, jakarta.jms.DeliveryMode.NON_PERSISTENT, 0, 0, shard);
                 }
@@ -131,6 +133,7 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
                 bm.writeBytes(b);
                 bm.setStringProperty(streamInfo.getIdentKey(), streamInfo.getIdentId());
                 bm.setStringProperty(streamInfo.getIoTypeKey(), streamInfo.getInputId());
+                stampWriter(bm);
                 bm.setIntProperty("dp_bytes", b.length); // readable payload size for link throughput metrics
                 DATAPLANE_BYTES.addAndGet(b.length);
                 DATAPLANE_MESSAGES.incrementAndGet();
@@ -142,20 +145,93 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
         }
     }
 
+    /** The verified writer of everything this client publishes: {@code cresco_writer} and {@code cresco_writer_roles}. */
+    static final String WRITER = "cresco_writer";
+    static final String WRITER_ROLES = "cresco_writer_roles";
+
+    private void stampWriter(jakarta.jms.Message m) throws jakarta.jms.JMSException {
+        if (principal == null) return;
+        m.setStringProperty(WRITER, principal.caller());
+        m.setStringProperty(WRITER_ROLES, principal.role);
+    }
+
     /** The size of a text frame's payload in bytes (its UTF-8 encoding), not in characters. */
     static long utf8Bytes(TextWebSocketFrame frame) {
         return frame.content().readableBytes();
+    }
+
+    /** Handshakes a connection may have refused before it is closed. */
+    static final int MAX_REFUSED_HANDSHAKES = 3;
+    private int refusedHandshakes;
+
+    /**
+     * Refuse a handshake: status 9 with the reason. The stream stays unactivated and the next text frame is a new
+     * handshake; after {@link #MAX_REFUSED_HANDSHAKES} refusals the connection is closed.
+     */
+    private void refuse(ChannelHandlerContext ctx, String why) {
+        logger.warn("DataPlaneWsHandler: handshake refused for " + principal + ": " + why);
+        Map<String, String> refused = new java.util.HashMap<>();
+        refused.put("status_code", "9");
+        refused.put("status_desc", "refused: " + why);
+        io.netty.channel.ChannelFuture f = ctx.writeAndFlush(new TextWebSocketFrame(gson.toJson(refused)));
+        if (++refusedHandshakes >= MAX_REFUSED_HANDSHAKES) f.addListener(io.netty.channel.ChannelFutureListener.CLOSE);
+    }
+
+    /** The prefix of the dataplane streams a user owns: {@code u:<user>:}. */
+    static String ownPrefix(Authenticator.Principal p) {
+        return "u:" + p.user + ":";
+    }
+
+    /** May {@code p} use stream {@code name}: its own ({@code u:<user>:...}) or granted (exact, or a prefix ending in *)? */
+    static boolean owns(Authenticator.Principal p, String name) {
+        if (name == null) return false;
+        if (name.startsWith(ownPrefix(p))) return true;
+        for (String g : p.grants) {
+            if (g.endsWith("*") ? name.startsWith(g.substring(0, g.length() - 1)) : name.equals(g)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * What a {@code user} may do on the dataplane (admins and the service key are not limited here): only streams it owns
+     * ({@code u:<user>:...}) or was granted, named by {@code stream_name}; a raw subscription must anchor
+     * {@code stream_name = '<such a stream>'}; it never writes a process's stdin ({@code type=input*}), and writes
+     * {@code type=output} only on its own streams (on a granted stream that would pose as a process's output).
+     *
+     * @return null when allowed, else why not
+     */
+    static String userStreamRefusal(StreamInfo si, Authenticator.Principal p) {
+        if (p == null) return "no authenticated caller";
+        if (p.isAdmin()) return null;
+        if (si.getStream_query() != null) {
+            List<String> anchors;
+            try {
+                anchors = StreamSelectors.equalityValues(si.getStream_query(), "stream_name");
+            } catch (IllegalArgumentException bad) {
+                return bad.getMessage();
+            }
+            for (String v : anchors) if (owns(p, v)) return null;
+            return p + " may subscribe only to its own streams (stream_name = '" + ownPrefix(p) + "...') or streams granted to it";
+        }
+        if (!"stream_name".equals(si.getIdentKey())) return p + " names its streams with ident_key stream_name";
+        if (!owns(p, si.getIdentId())) {
+            return p + " may use only its own streams (" + ownPrefix(p) + "...) or streams granted to it, not " + si.getIdentId();
+        }
+        if ("type".equals(si.getIoTypeKey()) && si.getInputId() != null) {
+            String t = si.getInputId();
+            if (t.equals("input") || t.startsWith("input-")) return p + " may not write a process's stdin (type=" + t + ")";
+            if (t.equals("output") && !si.getIdentId().startsWith(ownPrefix(p))) {
+                return p + " may write type=output only on its own streams";
+            }
+        }
+        return null;
     }
 
     private void handshake(ChannelHandlerContext ctx, String message) {
         // the dataplane wsapi reads and writes is this agent's tenant's: only callers of that tenant may use it
         String tenantRefusal = tenantRefusal(principal, gate == null ? null : gate.authenticator.agentTenant());
         if (tenantRefusal != null) {
-            logger.warn("DataPlaneWsHandler: handshake refused: " + tenantRefusal);
-            Map<String, String> refused = new java.util.HashMap<>();
-            refused.put("status_code", "9");
-            refused.put("status_desc", "refused: " + tenantRefusal);
-            ctx.writeAndFlush(new TextWebSocketFrame(gson.toJson(refused))).addListener(io.netty.channel.ChannelFutureListener.CLOSE);
+            refuse(ctx, tenantRefusal);
             return;
         }
         StreamInfo si;
@@ -170,23 +246,25 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
             si = new StreamInfo("netty", message);
         }
 
-        // Shard is derived from the stream ident -- the one key both the publishing endpoint and the
-        // subscribing endpoint share -- so both land on the same shard-topic (global.event.<shard>).
-        this.shard = plugin.getAgentService().getDataPlaneService().shardFor(si.getIdentId());
-
         Map<String, String> response = new java.util.HashMap<>();
         String selector;
         try {
             // never a stdin message, whatever the client's selector (StreamSelectors.NO_STDIN)
             selector = StreamSelectors.subscriptionSelector(si);
         } catch (IllegalArgumentException refused) {
-            // a selector the client could shape would let it subscribe to other streams: refuse and hang up
-            logger.warn("DataPlaneWsHandler: handshake refused: " + refused.getMessage());
-            response.put("status_code", "9");
-            response.put("status_desc", "refused: " + refused.getMessage());
-            ctx.writeAndFlush(new TextWebSocketFrame(gson.toJson(response))).addListener(io.netty.channel.ChannelFutureListener.CLOSE);
+            // a selector the client could shape would let it subscribe to other streams, or write reserved properties
+            refuse(ctx, refused.getMessage());
             return;
         }
+        String roleRefusal = userStreamRefusal(si, principal);
+        if (roleRefusal != null) {
+            refuse(ctx, roleRefusal);
+            return;
+        }
+
+        // Shard is derived from the stream ident -- the one key both the publishing endpoint and the
+        // subscribing endpoint share -- so both land on the same shard-topic (global.event.<shard>).
+        this.shard = plugin.getAgentService().getDataPlaneService().shardFor(si.getIdentId());
         response.putAll(activationReply(() -> createListener(ctx, si, selector)));
         String code = response.get("status_code");
         if (STATUS_ACTIVE.equals(code) || STATUS_SUBSCRIPTION_REFUSED.equals(code)) {

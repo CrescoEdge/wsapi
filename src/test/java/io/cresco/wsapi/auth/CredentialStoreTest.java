@@ -48,6 +48,26 @@ class CredentialStoreTest {
     }
 
     @Test
+    void streamGrantsAreParsedValidatedAndManagedByTheTool(@TempDir Path dir) throws Exception {
+        CredentialStore s = CredentialStore.parse("bob:tenant-a:user:" + HASH + ":job-7,team/*\n", "f");
+        assertEquals(java.util.List.of("job-7", "team/*"), s.get("bob").grants);
+        assertThrows(CredentialStore.Invalid.class, () -> CredentialStore.parse("bob:tenant-a:user:" + HASH + ":bad grant\n", "f"));
+        Path f = dir.resolve("ws.users");
+        CredentialTool.PasswordSource pw = prompt -> "first-password-1".toCharArray();
+        PrintStream o = new PrintStream(new ByteArrayOutputStream()), e = new PrintStream(new ByteArrayOutputStream());
+        assertEquals(0, CredentialTool.run(new String[]{"add", f.toString(), "bob", "tenant-a", "user"}, o, e, pw));
+        assertEquals(0, CredentialTool.run(new String[]{"grant", f.toString(), "bob", "job-7"}, o, e, pw));
+        assertEquals(0, CredentialTool.run(new String[]{"grant", f.toString(), "bob", "team/*"}, o, e, pw));
+        assertEquals(java.util.List.of("job-7", "team/*"), CredentialTool.load(f).get("bob").grants);
+        assertEquals(0, CredentialTool.run(new String[]{"passwd", f.toString(), "bob"}, o, e, pw));
+        assertEquals(java.util.List.of("job-7", "team/*"), CredentialTool.load(f).get("bob").grants, "a new password keeps the grants");
+        assertEquals(0, CredentialTool.run(new String[]{"revoke", f.toString(), "bob", "job-7"}, o, e, pw));
+        assertEquals(java.util.List.of("team/*"), CredentialTool.load(f).get("bob").grants);
+        assertEquals(1, CredentialTool.run(new String[]{"revoke", f.toString(), "bob", "job-7"}, o, e, pw));
+        assertEquals(1, CredentialTool.run(new String[]{"grant", f.toString(), "bob", "x y"}, o, e, pw));
+    }
+
+    @Test
     void theToolAddsChangesListsAndRemovesUsersInAnOwnerOnlyFile(@TempDir Path dir) throws Exception {
         Path f = dir.resolve("ws.users");
         String[] next = {"first-password-1"};

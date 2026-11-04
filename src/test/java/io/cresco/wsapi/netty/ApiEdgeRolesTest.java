@@ -1,0 +1,201 @@
+package io.cresco.wsapi.netty;
+
+import com.google.gson.Gson;
+import io.cresco.library.messaging.MsgEvent;
+import io.cresco.library.plugin.PluginBuilder;
+import io.cresco.wsapi.auth.Authenticator;
+import io.cresco.wsapi.websockets.StreamInfo;
+import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
+import jakarta.jms.Message;
+import org.junit.jupiter.api.Test;
+
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+/**
+ * Role separation at the API edge: dataplane stream ownership and grants, reserved properties, the writer stamp, the log
+ * stream for users, a user's destinations, the address a failure counts against, and browser Origins.
+ */
+class ApiEdgeRolesTest {
+
+    static Authenticator.Principal principal(String tenant, String user, String role, List<String> grants) throws Exception {
+        java.lang.reflect.Constructor<Authenticator.Principal> c = Authenticator.Principal.class
+                .getDeclaredConstructor(String.class, String.class, String.class, boolean.class, List.class);
+        c.setAccessible(true);
+        return c.newInstance(tenant, user, role, false, grants);
+    }
+
+    static StreamInfo json(String key, String id, String typeKey, String in) {
+        StreamInfo si = new StreamInfo("t", key, id);
+        si.setIoTypeKey(typeKey);
+        si.setInputId(in);
+        return si;
+    }
+
+    @Test
+    void aUserUsesOnlyItsOwnAndGrantedStreams() throws Exception {
+        Authenticator.Principal bob = principal("tenant-a", "bob", "user", List.of("shared-job-7", "team/*"));
+        assertNull(DataPlaneWsHandler.userStreamRefusal(json("stream_name", "u:bob:mine", "type", "output"), bob));
+        assertNull(DataPlaneWsHandler.userStreamRefusal(json("stream_name", "shared-job-7", "type", "in"), bob));
+        assertNull(DataPlaneWsHandler.userStreamRefusal(json("stream_name", "team/x", "type", "in"), bob));
+        assertNull(DataPlaneWsHandler.userStreamRefusal(new StreamInfo("t", "stream_name='u:bob:mine' AND type='output'"), bob));
+        assertNull(DataPlaneWsHandler.userStreamRefusal(new StreamInfo("t", "type='error' AND stream_name='team/build'"), bob));
+        for (StreamInfo no : new StreamInfo[]{
+                json("stream_name", "u:alice:x", "type", "in"),                 // another user's
+                json("stream_name", "u:bob", "type", "in"),                     // not under u:bob:
+                json("stream_name", "admin-job", "type", "in"),
+                json("job", "u:bob:x", "type", "in"),                           // not named by stream_name
+                json("stream_name", "shared-job-7", "type", "output"),          // posing as a process's output
+                json("stream_name", "u:bob:x", "type", "input-0123"),           // a process's stdin
+                json("stream_name", "u:bob:x", "type", "input"),
+                new StreamInfo("t", "type='output'"),
+                new StreamInfo("t", "seq_num='0'"),
+                new StreamInfo("t", "stream_name='admin-job'"),
+                new StreamInfo("t", "stream_name='u:alice:x'")}) {
+            assertNotNull(DataPlaneWsHandler.userStreamRefusal(no, bob), String.valueOf(no.getIdentId() != null ? no.getIdentId() : no.getStream_query()));
+        }
+        Authenticator.Principal admin = principal("tenant-a", "alice", "admin", List.of());
+        assertNull(DataPlaneWsHandler.userStreamRefusal(new StreamInfo("t", "type='output'"), admin), "admins are not limited by ownership");
+        assertNull(DataPlaneWsHandler.userStreamRefusal(json("stream_name", "runner-1", "type", "input-0123"), admin), "an admin feeds stdin");
+    }
+
+    @Test
+    void reservedPropertyNamesAreRefusedForEveryone() {
+        for (String name : new String[]{"cresco_caller", "CRESCO_caller_roles", "cresco_tenant", "cresco_writer", "transfer_id",
+                "transfer_end", "seq_num", "offset", "sha384", "dp_bytes", "region_id", "session_id", "loglevel"}) {
+            assertTrue(StreamSelectors.reservedName(name), name);
+            assertThrows(IllegalArgumentException.class, () -> StreamSelectors.selectorFor(json(name, "v", "type", "in")), name);
+            assertThrows(IllegalArgumentException.class, () -> StreamSelectors.selectorFor(json("stream_name", "v", name, "in")), name);
+        }
+        assertFalse(StreamSelectors.reservedName("stream_name"));
+        assertFalse(StreamSelectors.reservedName("type"));
+    }
+
+    @Test
+    void everythingAClientPublishesCarriesItsVerifiedWriter() throws Exception {
+        ReviewApiDataplaneTest.Recorder rec = new ReviewApiDataplaneTest.Recorder();
+        PluginBuilder plugin = ReviewApiDataplaneTest.plugin(rec);
+        Authenticator.Principal bob = principal("tenant-a", "bob", "user", List.of());
+        EmbeddedChannel ch = new EmbeddedChannel(new DataPlaneWsHandler(plugin, bob, ReviewApiDataplaneTest.gate(plugin, new ArrayList<>())));
+        ch.writeInbound(new TextWebSocketFrame(new Gson().toJson(Map.of("ident_key", "stream_name", "ident_id", "u:bob:s",
+                "io_type_key", "type", "input_id", "in"))));
+        assertEquals("10", ReviewApiDataplaneTest.reply(ch).get("status_code"));
+        ch.writeInbound(new TextWebSocketFrame("hello"));
+        assertEquals(1, rec.sent.size());
+        Message m = rec.sent.get(0);
+        assertEquals("api:tenant-a/bob", m.getStringProperty("cresco_writer"));
+        assertEquals("user", m.getStringProperty("cresco_writer_roles"));
+        assertEquals("u:bob:s", m.getStringProperty("stream_name"));
+        // the subscription bob made: his stream only, never stdin
+        String sel = rec.selectors.get(0);
+        assertTrue(sel.contains("stream_name='u:bob:s'") && sel.contains(StreamSelectors.NO_STDIN), sel);
+    }
+
+    @Test
+    void aRefusedHandshakeLeavesTheStreamUnactivatedAndTheThirdClosesIt() throws Exception {
+        ReviewApiDataplaneTest.Recorder rec = new ReviewApiDataplaneTest.Recorder();
+        PluginBuilder plugin = ReviewApiDataplaneTest.plugin(rec);
+        EmbeddedChannel ch = new EmbeddedChannel(new DataPlaneWsHandler(plugin, principal("tenant-a", "bob", "user", List.of()),
+                ReviewApiDataplaneTest.gate(plugin, new ArrayList<>())));
+        ch.writeInbound(new TextWebSocketFrame("type='output'"));
+        assertEquals("9", ReviewApiDataplaneTest.reply(ch).get("status_code"));
+        ch.writeInbound(new TextWebSocketFrame("seq_num='0'"));
+        assertEquals("9", ReviewApiDataplaneTest.reply(ch).get("status_code"));
+        assertTrue(ch.isOpen());
+        ch.writeInbound(new TextWebSocketFrame("stream_name='admin'"));
+        assertEquals("9", ReviewApiDataplaneTest.reply(ch).get("status_code"));
+        assertFalse(ch.isOpen(), "closed after " + DataPlaneWsHandler.MAX_REFUSED_HANDSHAKES + " refusals");
+        assertTrue(rec.selectors.isEmpty() && rec.sent.isEmpty());
+    }
+
+    @Test
+    void aUserCannotConfigureTheLogStreamAndSeesOnlyWarningsAnAdminCan() throws Exception {
+        ReviewApiDataplaneTest.Recorder rec = new ReviewApiDataplaneTest.Recorder();
+        PluginBuilder plugin = ReviewApiDataplaneTest.plugin(rec);
+        List<Object[]> rpcs = Collections.synchronizedList(new ArrayList<>());
+        EmbeddedChannel user = new EmbeddedChannel(new LogStreamerWsHandler(plugin, principal("tenant-a", "bob", "user", List.of()),
+                ReviewApiDataplaneTest.gate(plugin, rpcs)));
+        user.pipeline().fireUserEventTriggered(new io.netty.handler.codec.http.websocketx.WebSocketServerProtocolHandler.HandshakeComplete("/api/logstreamer",
+                new io.netty.handler.codec.http.DefaultHttpHeaders(), null));
+        user.writeInbound(new TextWebSocketFrame("region-1,agent-1,Info,io.cresco"));
+        assertTrue(rpcs.isEmpty(), "no setlogdp / setloglevel for a user");
+        String sel = rec.selectors.get(0);
+        assertTrue(sel.contains("loglevel = 'Warn' OR loglevel = 'Error'"), sel);
+        EmbeddedChannel admin = new EmbeddedChannel(new LogStreamerWsHandler(plugin, principal("tenant-a", "alice", "admin", List.of()),
+                ReviewApiDataplaneTest.gate(plugin, rpcs)));
+        admin.writeInbound(new TextWebSocketFrame("region-1,agent-1,Info,io.cresco"));
+        List<String> actions = new ArrayList<>();
+        for (Object[] r : rpcs) actions.add(((MsgEvent) r[0]).getParam("action"));
+        assertEquals(List.of("setlogdp", "setloglevel"), actions);
+    }
+
+    @Test
+    void aUserAddressesOnlyItsOwnRegion() throws Exception {
+        Authenticator.Principal bob = principal("tenant-a", "bob", "user", List.of());
+        assertNull(ApiSocketWsHandler.destinationRefusal(Map.of("message_type", "global_agent_msgevent", "dst_region", "r1", "dst_agent", "a2"), bob, "r1", "r1"));
+        assertNull(ApiSocketWsHandler.destinationRefusal(Map.of("message_type", "global_controller_msgevent"), bob, "r1", "r1"));
+        assertNull(ApiSocketWsHandler.destinationRefusal(Map.of("message_type", "plugin_msgevent"), bob, "r1", "rg"));
+        assertNotNull(ApiSocketWsHandler.destinationRefusal(Map.of("message_type", "global_agent_msgevent", "dst_region", "r2", "dst_agent", "a"), bob, "r1", "r1"));
+        assertNotNull(ApiSocketWsHandler.destinationRefusal(Map.of("message_type", "global_controller_msgevent"), bob, "r1", "rg"), "the global is in another region");
+        assertNotNull(ApiSocketWsHandler.destinationRefusal(Map.of("message_type", "global_controller_msgevent", "region_id", "r9", "agent_id", "x"), bob, "r1", "r1"));
+        assertNotNull(ApiSocketWsHandler.destinationRefusal(Map.of("message_type", "global_plugin_msgevent"), bob, "r1", "r1"), "no region named");
+        assertNull(ApiSocketWsHandler.destinationRefusal(Map.of("message_type", "global_agent_msgevent", "dst_region", "r2"),
+                principal("tenant-a", "alice", "admin", List.of()), "r1", "r1"), "admins are not limited here");
+    }
+
+    static String source(String ip) throws Exception {
+        return WsRouter.sourceOf(new InetSocketAddress(InetAddress.getByName(ip), 1));
+    }
+
+    @Test
+    void failuresCountPerIpv4AddressAndPerIpv6Slash64() throws Exception {
+        assertEquals("2001:db8:aa:bb::/64", source("2001:db8:aa:bb::1"));
+        assertEquals("2001:db8:aa:bb::/64", source("2001:db8:aa:bb:ffff:1:2:3"));
+        assertNotEquals(source("2001:db8:aa:bb::1"), source("2001:db8:aa:bc::1"));
+        assertEquals("192.0.2.7", source("192.0.2.7"));
+        assertEquals("192.0.2.7", source("::ffff:192.0.2.7"), "an IPv4-mapped address is its IPv4 address");
+    }
+
+    @Test
+    void browserOriginsAreRefusedUnlessWsapisOwnOrAllowlisted() {
+        WsRouter.Gate g = new WsRouter.Gate(null, null, 1, 1, null).limits(2, 64, 256, List.of("https://console.example.org/"));
+        assertTrue(g.originAllowed(null, "agent:8282"), "no Origin: not a browser");
+        assertTrue(g.originAllowed("https://agent:8282", "agent:8282"), "wsapi's own origin (older Java clients send it)");
+        assertTrue(g.originAllowed("https://AGENT", "agent:443"));
+        assertTrue(g.originAllowed("https://console.example.org", "agent:8282"), "allowlisted");
+        assertFalse(g.originAllowed("https://evil.example", "agent:8282"));
+        assertFalse(g.originAllowed("http://agent:8282", "agent:8282"), "not over TLS");
+        assertFalse(g.originAllowed("https://agent:8283", "agent:8282"), "another port is another origin");
+        assertFalse(g.originAllowed("null", "agent:8282"));
+        g.shutdown();
+    }
+
+    @Test
+    void passwordChecksPendingPerSourceAndConnectionsPerCallerAreBounded() throws Exception {
+        WsRouter.Gate g = new WsRouter.Gate(null, null, 1, 1, null).limits(2, 3, 5, List.of());
+        assertTrue(g.reservePending("s"));
+        assertTrue(g.reservePending("s"));
+        assertFalse(g.reservePending("s"), "a third pending check from one source waits its turn");
+        assertTrue(g.reservePending("other"), "other sources are not affected");
+        g.releasePending("s");
+        assertTrue(g.reservePending("s"));
+        Authenticator.Principal bob = principal("tenant-a", "bob", "user", List.of());
+        for (int i = 0; i < 3; i++) assertTrue(g.openConnection(bob));
+        assertFalse(g.openConnection(bob));
+        assertEquals(3, g.connections(bob));
+        g.closeConnection(bob);
+        assertTrue(g.openConnection(bob));
+        Authenticator.Principal alice = principal("tenant-a", "alice", "admin", List.of());
+        for (int i = 0; i < 5; i++) assertTrue(g.openConnection(alice));
+        assertFalse(g.openConnection(alice));
+        g.shutdown();
+    }
+}

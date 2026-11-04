@@ -9,6 +9,7 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -20,14 +21,18 @@ import java.util.function.Supplier;
 /**
  * Authenticates a wsapi client from its HTTP upgrade request: per-user credentials ({@code Authorization: Basic},
  * checked against the {@link CredentialStore}) or the legacy {@code cresco_service_key} header (an {@code admin} of
- * this agent's tenant, unless disabled). Then decides whether that caller may use this agent's wsapi at all: a caller
- * of another tenant only as an {@code admin} of a superuser tenant.
+ * this agent's tenant, unless disabled, and only when it is strong: {@link #serviceKeyWeakness}). Then decides whether
+ * that caller may use this agent's wsapi at all: a caller of another tenant only as an {@code admin} of a superuser
+ * tenant.
  *
- * <p>Failures are counted ({@link AuthRateLimiter}); a locked-out source or user is refused before its credentials are
- * checked. An unknown user costs the same PBKDF2 work as a known one. A verified password is remembered for
+ * <p>Failures are limited by {@link AuthRateLimiter}; a refused source or user is answered 429 before its credentials
+ * are checked. An unknown user costs the same PBKDF2 work as a known one. A verified password is remembered for
  * {@code cacheMs} as an HMAC under a per-process random key (never the password), so a client opening several
- * connections does not pay PBKDF2 for each; a store change forgets every remembered password. Secrets never appear in
- * a {@link Result}.
+ * connections does not pay PBKDF2 for each; a store change forgets every remembered password.
+ *
+ * <p>{@link #authenticateFast} answers everything that costs no PBKDF2 (refusals, malformed headers, the service key,
+ * remembered passwords) and can run on a network thread; only an unremembered password needs {@link #authenticate}
+ * on a worker. Secrets never appear in a {@link Result}.
  */
 public final class Authenticator {
 
@@ -37,19 +42,32 @@ public final class Authenticator {
         public final String user;
         public final String role;
         public final boolean serviceKey;
+        /** Dataplane streams granted besides the user's own (exact names, or prefixes ending in *). */
+        public final List<String> grants;
 
         Principal(String tenant, String user, String role, boolean serviceKey) {
+            this(tenant, user, role, serviceKey, List.of());
+        }
+
+        Principal(String tenant, String user, String role, boolean serviceKey, List<String> grants) {
             this.tenant = tenant;
             this.user = user;
             this.role = role;
             this.serviceKey = serviceKey;
+            this.grants = grants == null ? List.of() : List.copyOf(grants);
         }
 
         public boolean isAdmin() { return CredentialStore.ROLE_ADMIN.equals(role); }
 
+        /** {@code tenant/user}: one key per caller (limits, connection counts). */
+        public String key() { return tenant + "/" + user; }
+
         /** {@code api:<tenant>/<user>}, as the controller's caller stamp names it. */
+        public String caller() { return "api:" + tenant + "/" + user; }
+
+        /** {@code api:<tenant>/<user>[role]}. */
         @Override
-        public String toString() { return "api:" + tenant + "/" + user + "[" + role + "]"; }
+        public String toString() { return caller() + "[" + role + "]"; }
     }
 
     /** The outcome. {@code status} is 0 on success, else the HTTP status to answer the upgrade with. */
@@ -82,6 +100,11 @@ public final class Authenticator {
 
     public static final String SERVICE_KEY_HEADER = "cresco_service_key";
     public static final String AUTHORIZATION_HEADER = "Authorization";
+    /** The weakest service key accepted (estimated bits; see {@link #serviceKeyWeakness}). */
+    public static final int MIN_SERVICE_KEY_BITS = 128;
+    private static final Set<String> WEAK_KEYS = Set.of("12345", "123456", "1234567890", "password", "changeit", "cresco",
+            "secret", "admin", "servicekey", "service-key", "service_key", "test", "default", "letmein", "qwerty", "mykey",
+            "your-service-key", "a-service-key");
 
     private final Supplier<CredentialStore> store;
     private final Supplier<String> serviceKey;
@@ -96,6 +119,8 @@ public final class Authenticator {
     private final Map<String, Remembered> verified = new ConcurrentHashMap<>();
     private static final int MAX_REMEMBERED = 4096;
     private final PasswordHash decoy;
+    private volatile String checkedKey;
+    private volatile String checkedKeyWeakness;
 
     private static final class Remembered {
         final long expires;
@@ -126,55 +151,112 @@ public final class Authenticator {
     }
 
     /**
+     * Why a service key is too weak to enable, or null when it is strong enough: a known weak value, fewer than 8
+     * distinct characters, or fewer than {@link #MIN_SERVICE_KEY_BITS} bits estimated as its length times log2 of the
+     * size of the character classes it uses (lower case, upper case, digits, others). 32 random hex digits (128 bits)
+     * pass; {@code 12345} does not.
+     */
+    public static String serviceKeyWeakness(String key) {
+        if (key == null || key.isEmpty()) return "it is empty";
+        if (WEAK_KEYS.contains(key.toLowerCase(Locale.ROOT))) return "it is a well-known weak value";
+        if (key.chars().distinct().count() < 8) return "it has fewer than 8 distinct characters";
+        int classes = 0;
+        if (key.chars().anyMatch(c -> c >= 'a' && c <= 'z')) classes += 26;
+        if (key.chars().anyMatch(c -> c >= 'A' && c <= 'Z')) classes += 26;
+        if (key.chars().anyMatch(c -> c >= '0' && c <= '9')) classes += 10;
+        if (key.chars().anyMatch(c -> !Character.isLetterOrDigit(c))) classes += 33;
+        double bits = key.length() * (Math.log(Math.max(2, classes)) / Math.log(2));
+        if (bits < MIN_SERVICE_KEY_BITS) {
+            return "it has about " + (int) bits + " bits; at least " + MIN_SERVICE_KEY_BITS + " are required (e.g. 32 random hex digits)";
+        }
+        return null;
+    }
+
+    /** Why the configured service key is not in use, or null when it is. */
+    public String serviceKeyProblem() {
+        if (!serviceKeyEnabled.getAsBoolean()) return "service key authentication is disabled (wsapi_service_key_enabled=false)";
+        String k = serviceKey.get();
+        if (k == null || k.isEmpty()) return "no cresco_service_key is configured";
+        String w = weakness(k);
+        return w == null ? null : "the configured cresco_service_key is too weak and is not accepted: " + w;
+    }
+
+    private String weakness(String key) {
+        if (!key.equals(checkedKey)) {
+            checkedKeyWeakness = serviceKeyWeakness(key);
+            checkedKey = key;
+        }
+        return checkedKeyWeakness;
+    }
+
+    /**
      * Authenticate one upgrade request.
      *
      * @param authorization the {@code Authorization} header, or null
      * @param serviceKeyHeader the {@code cresco_service_key} header, or null
-     * @param source the client address (rate limiting and logs)
+     * @param source the client source (rate limiting and logs; see {@code WsRouter.sourceOf})
      */
     public Result authenticate(String authorization, String serviceKeyHeader, String source) {
+        Result fast = authenticateFast(authorization, serviceKeyHeader, source);
+        if (fast != null) return fast;
+        return basicSlow(parseBasic(authorization), source, agentTenant.get());
+    }
+
+    /**
+     * Everything that needs no PBKDF2: an unknown tenant, a refused source or user, missing or malformed credentials, the
+     * service key, and a remembered password. Null when only a password check ({@link #authenticate}) can decide.
+     */
+    public Result authenticateFast(String authorization, String serviceKeyHeader, String source) {
         String tenant = agentTenant.get();
         if (tenant == null || tenant.isEmpty()) {
             return Result.fail(503, "wsapi is not ready: this agent's tenant is not known yet", "agent tenant unknown", null);
         }
         if (authorization != null) {
-            return basic(authorization, source, tenant);
+            String[] up = parseBasic(authorization);
+            String user = up == null ? null : up[0];
+            long wait = limiter.retryAfterMs(source, user);
+            if (wait > 0) return limited(wait, user);
+            if (up == null) {
+                limiter.failure(source, null);
+                return Result.fail(401, "authentication failed", "malformed Authorization header (expected Basic user:password)", null);
+            }
+            CredentialStore s = store.get();
+            CredentialStore.Entry e = s.get(user);
+            if (e != null && rememberedOk(s, user, up[1])) return accept(e, source, tenant);
+            return null;                                         // a PBKDF2 check decides
         }
-        if (serviceKeyHeader != null) {
-            return serviceKey(serviceKeyHeader, source, tenant);
-        }
+        if (serviceKeyHeader != null) return serviceKey(serviceKeyHeader, source, tenant);
+        limiter.failure(source, null);
         return Result.fail(401, "authentication required", "no credentials", null);
     }
 
     private Result serviceKey(String provided, String source, String tenant) {
-        long wait = limiter.retryAfterMs(source, null);
+        long wait = limiter.retryAfterMs(source, AuthRateLimiter.SERVICE_KEY);
         if (wait > 0) return limited(wait, CredentialStore.SERVICE_KEY_USER);
-        if (!serviceKeyEnabled.getAsBoolean()) {
-            limiter.failure(source, null);
-            return Result.fail(401, "authentication failed", "service key authentication is disabled (wsapi_service_key_enabled=false)", CredentialStore.SERVICE_KEY_USER);
+        String problem = serviceKeyProblem();
+        if (problem != null) {
+            limiter.failure(source, AuthRateLimiter.SERVICE_KEY);
+            return Result.fail(401, "authentication failed", problem, CredentialStore.SERVICE_KEY_USER);
         }
-        String expected = serviceKey.get();
-        if (expected == null || expected.isEmpty()) {
-            limiter.failure(source, null);
-            return Result.fail(401, "authentication failed", "no cresco_service_key is configured", CredentialStore.SERVICE_KEY_USER);
-        }
-        if (!keyMatches(expected, provided)) {
-            limiter.failure(source, null);
+        if (!keyMatches(serviceKey.get(), provided)) {
+            limiter.failure(source, AuthRateLimiter.SERVICE_KEY);
             return Result.fail(401, "authentication failed", "wrong service key", CredentialStore.SERVICE_KEY_USER);
         }
-        limiter.success(source);
+        limiter.success(source, AuthRateLimiter.SERVICE_KEY);
         return Result.ok(new Principal(tenant, CredentialStore.SERVICE_KEY_USER, CredentialStore.ROLE_ADMIN, true));
     }
 
-    private Result basic(String header, String source, String agentTenantName) {
-        String[] up = parseBasic(header);
-        String user = up == null ? null : up[0];
-        long wait = limiter.retryAfterMs(source, user);
-        if (wait > 0) return limited(wait, user);
+    private Result basicSlow(String[] up, String source, String agentTenantName) {
+        if (agentTenantName == null || agentTenantName.isEmpty()) {
+            return Result.fail(503, "wsapi is not ready: this agent's tenant is not known yet", "agent tenant unknown", null);
+        }
         if (up == null) {
             limiter.failure(source, null);
             return Result.fail(401, "authentication failed", "malformed Authorization header (expected Basic user:password)", null);
         }
+        String user = up[0];
+        long wait = limiter.retryAfterMs(source, user);          // again: other attempts may have failed meanwhile
+        if (wait > 0) return limited(wait, user);
         char[] secret = up[1].toCharArray();
         try {
             CredentialStore s = store.get();
@@ -184,27 +266,31 @@ public final class Authenticator {
                 decoy.matches(secret);                       // same work as a real check: no user enumeration by timing
                 good = false;
             } else {
-                good = rememberedOk(s, user, secret) || e.matches(secret);
+                good = e.matches(secret);
             }
             if (!good) {
                 limiter.failure(source, user);
                 return Result.fail(401, "authentication failed", e == null ? "unknown user" : "wrong password", user);
             }
-            remember(s, user, secret);
-            limiter.success(source);
-            Principal p = new Principal(e.tenant, e.user, e.role, false);
-            if (!p.tenant.equals(agentTenantName)) {
-                boolean superAdmin = p.isAdmin() && superuserTenants.get().contains(p.tenant);
-                if (!superAdmin) {
-                    return Result.fail(403, "forbidden: a caller of tenant " + p.tenant + " cannot use the wsapi of an agent in tenant "
-                                    + agentTenantName + " (only an admin of a superuser tenant can)",
-                            p + " is not of this agent's tenant " + agentTenantName, user);
-                }
-            }
-            return Result.ok(p);
+            remember(s, user, up[1]);
+            return accept(e, source, agentTenantName);
         } finally {
             Arrays.fill(secret, '\0');
         }
+    }
+
+    private Result accept(CredentialStore.Entry e, String source, String agentTenantName) {
+        limiter.success(source, e.user);
+        Principal p = new Principal(e.tenant, e.user, e.role, false, e.grants);
+        if (!p.tenant.equals(agentTenantName)) {
+            boolean superAdmin = p.isAdmin() && superuserTenants.get().contains(p.tenant);
+            if (!superAdmin) {
+                return Result.fail(403, "forbidden: a caller of tenant " + p.tenant + " cannot use the wsapi of an agent in tenant "
+                                + agentTenantName + " (only an admin of a superuser tenant can)",
+                        p + " is not of this agent's tenant " + agentTenantName, e.user);
+            }
+        }
+        return Result.ok(p);
     }
 
     private Result limited(long waitMs, String user) {
@@ -215,6 +301,7 @@ public final class Authenticator {
 
     /** {@code [user, password]} from {@code Basic base64(user:password)}, or null when malformed. */
     static String[] parseBasic(String header) {
+        if (header == null) return null;
         String h = header.strip();
         if (h.length() < 6 || !h.substring(0, 6).toLowerCase(Locale.ROOT).equals("basic ")) return null;
         byte[] raw;
@@ -238,16 +325,13 @@ public final class Authenticator {
         return MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8), provided.getBytes(StandardCharsets.UTF_8));
     }
 
-    private String rememberKey(String user, char[] secret) {
+    private String rememberKey(String user, String secret) {
         try {
             Mac mac = Mac.getInstance("HmacSHA384");
             mac.init(new SecretKeySpec(cacheKey, "HmacSHA384"));
             mac.update(user.getBytes(StandardCharsets.UTF_8));
             mac.update((byte) 0);
-            java.nio.ByteBuffer bb = StandardCharsets.UTF_8.encode(java.nio.CharBuffer.wrap(secret));
-            byte[] pw = new byte[bb.remaining()];
-            bb.get(pw);
-            if (bb.hasArray()) Arrays.fill(bb.array(), (byte) 0);
+            byte[] pw = secret.getBytes(StandardCharsets.UTF_8);
             try {
                 return Base64.getEncoder().encodeToString(mac.doFinal(pw));
             } finally {
@@ -258,13 +342,13 @@ public final class Authenticator {
         }
     }
 
-    private boolean rememberedOk(CredentialStore s, String user, char[] secret) {
+    private boolean rememberedOk(CredentialStore s, String user, String secret) {
         if (cacheMs == 0) return false;
         Remembered r = verified.get(rememberKey(user, secret));
         return r != null && r.store == s && r.expires > clock.getAsLong();
     }
 
-    private void remember(CredentialStore s, String user, char[] secret) {
+    private void remember(CredentialStore s, String user, String secret) {
         if (cacheMs == 0) return;
         long now = clock.getAsLong();
         if (verified.size() >= MAX_REMEMBERED) {

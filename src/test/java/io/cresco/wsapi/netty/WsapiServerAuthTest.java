@@ -95,7 +95,7 @@ class WsapiServerAuthTest {
     }
 
     static NettyWsServer startServer(AuthRateLimiter limiter, Set<String> superusers) throws Exception {
-        Authenticator auth = new Authenticator(() -> store, () -> "the-service-key-value", () -> true, () -> "tenant-a",
+        Authenticator auth = new Authenticator(() -> store, () -> "the-service-key-value-0123456789abcdef", () -> true, () -> "tenant-a",
                 () -> superusers, limiter, 300_000L, System::currentTimeMillis);
         ApiGateway recorder = new ApiGateway() {
             @Override public void send(MsgEvent msg, Authenticator.Principal caller) { sent.add(new Object[]{msg, caller, "send"}); }
@@ -188,7 +188,7 @@ class WsapiServerAuthTest {
 
     @Test
     void theServiceKeyIsAnAdminOfTheAgentsTenantAndReservedCallerParamsAreDropped() throws Exception {
-        Client c = open(WsRouter.APISOCKET_PATH, Map.of("cresco_service_key", "the-service-key-value"));
+        Client c = open(WsRouter.APISOCKET_PATH, Map.of("cresco_service_key", "the-service-key-value-0123456789abcdef"));
         Map<String, String> payload = new HashMap<>();
         payload.put("action", "listregions");
         payload.put("cresco_caller", "controller:tenant-a/r/a");         // a forged caller stamp
@@ -243,8 +243,8 @@ class WsapiServerAuthTest {
         assertEquals(401, refusedWith(WsRouter.DATAPLANE_PATH, Map.of("cresco_service_key", "wrong")));
         assertEquals(401, refusedWith(WsRouter.LOGSTREAMER_PATH, Map.of()));
         assertEquals(403, refusedWith(WsRouter.APISOCKET_PATH, basic("eve", "eve-password-333")));
-        assertEquals(404, refusedWith("/api/other", Map.of("cresco_service_key", "the-service-key-value")));
-        assertTrue(log.stream().noneMatch(l -> l.contains("wrong-password") || l.contains("the-service-key-value")), "secrets are never logged");
+        assertEquals(404, refusedWith("/api/other", Map.of("cresco_service_key", "the-service-key-value-0123456789abcdef")));
+        assertTrue(log.stream().noneMatch(l -> l.contains("wrong-password") || l.contains("the-service-key-value-0123456789abcdef")), "secrets are never logged");
         assertTrue(log.stream().anyMatch(l -> l.contains("refused") && l.contains("alice") && l.contains("401")));
     }
 
@@ -258,7 +258,7 @@ class WsapiServerAuthTest {
             assertEquals(401, refusedWith(WsRouter.APISOCKET_PATH, basic("alice", "guess-2")));
             assertEquals(401, refusedWith(WsRouter.APISOCKET_PATH, Map.of("cresco_service_key", "guess-3")));
             assertEquals(429, refusedWith(WsRouter.APISOCKET_PATH, basic("alice", "alice-password-1")), "locked even with the right password");
-            assertEquals(429, refusedWith(WsRouter.DATAPLANE_PATH, Map.of("cresco_service_key", "the-service-key-value")));
+            assertEquals(429, refusedWith(WsRouter.DATAPLANE_PATH, Map.of("cresco_service_key", "the-service-key-value-0123456789abcdef")));
         } finally {
             port = main;
             strict.stop();
@@ -345,6 +345,76 @@ class WsapiServerAuthTest {
         assertEquals(1024, WsRouter.maxMessageBytes(pb, WsRouter.APISOCKET_PATH), "at least 1 KiB");
         assertEquals(64 << 20, WsRouter.maxMessageBytes(pb, WsRouter.DATAPLANE_PATH), "not an int: the default");
         assertEquals(64 << 10, WsRouter.maxMessageBytes(pb, WsRouter.LOGSTREAMER_PATH), "not a number: the default");
+    }
+
+    @Test
+    void aBrowserOriginIsRefusedAndNoBasicChallengeIsEverSent() throws Exception {
+        Map<String, String> h = new HashMap<>(basic("bob", "bob-password-22"));
+        h.put("Origin", "https://evil.example");
+        assertEquals(403, refusedWith(WsRouter.APISOCKET_PATH, h), "a web page's Origin");
+        Map<String, String> own = new HashMap<>(basic("bob", "bob-password-22"));
+        own.put("Origin", "https://localhost:" + port);
+        assertEquals(101, refusedWith(WsRouter.APISOCKET_PATH, own), "wsapi's own origin, as older Java clients send it");
+        try {
+            open(WsRouter.APISOCKET_PATH, basic("alice", "wrong-password")).ws.abort();
+            fail("a wrong password was accepted");
+        } catch (java.util.concurrent.ExecutionException e) {
+            WebSocketHandshakeException w = (WebSocketHandshakeException) e.getCause();
+            assertEquals(401, w.getResponse().statusCode());
+            assertTrue(w.getResponse().headers().firstValue("WWW-Authenticate").isEmpty(), "never a Basic challenge");
+        }
+    }
+
+    @Test
+    void connectionsPerUserAndInFlightRpcsPerUserAreBounded() throws Exception {
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        Map<String, Object> cfg = new HashMap<>();
+        cfg.put("pluginID", "plugin/7");
+        cfg.put("wsapi_rpc_max_inflight_user", "2");
+        PluginBuilder pb = TestSupport.pluginBuilder(dir, cfg, log);
+        Authenticator auth = new Authenticator(() -> store, () -> null, () -> true, () -> "tenant-a", Set::of,
+                new AuthRateLimiter(1000, 1000, 60_000L, 60_000L, 900_000L, 1000, System::currentTimeMillis), 300_000L, System::currentTimeMillis);
+        ApiGateway slow = new ApiGateway() {
+            @Override public void send(MsgEvent msg, Authenticator.Principal caller) { }
+            @Override public MsgEvent rpc(MsgEvent msg, long timeoutMs, Authenticator.Principal caller) {
+                try { release.await(20, TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                msg.setParam("status", "10");
+                return msg;
+            }
+        };
+        WsRouter.Gate gate = new WsRouter.Gate(auth, slow, 2, 16, null).limits(2, 2, 8, List.of());
+        NettyWsServer s = new NettyWsServer(pb, 0, tls.keyStore, tls.password, 64 * 1024, gate);
+        s.start();
+        int main = port;
+        try {
+            port = s.boundPort();
+            Client a = open(WsRouter.APISOCKET_PATH, basic("bob", "bob-password-22"));
+            Client b = open(WsRouter.APISOCKET_PATH, basic("bob", "bob-password-22"));
+            assertEquals(429, refusedWith(WsRouter.APISOCKET_PATH, basic("bob", "bob-password-22")), "a third connection for bob");
+            for (int i = 1; i <= 3; i++) {
+                Map<String, Object> m = new HashMap<>();
+                m.put("message_info", Map.of("message_type", "plugin_msgevent", "message_event_type", "EXEC", "dst_plugin", "p", "is_rpc", "true"));
+                m.put("message_payload", Map.of("action", "slow", "client_rpc_id", "r" + i));
+                a.ws.sendText(new Gson().toJson(m), true).get(5, TimeUnit.SECONDS);
+            }
+            String busy = a.got.poll(10, TimeUnit.SECONDS);
+            assertNotNull(busy, "the over-limit request is answered at once");
+            Map<?, ?> r = new Gson().fromJson(busy, Map.class);
+            assertEquals("429", r.get("status"), busy);
+            assertEquals("r3", r.get("client_rpc_id"));
+            release.countDown();
+            assertNotNull(a.got.poll(10, TimeUnit.SECONDS));
+            assertNotNull(a.got.poll(10, TimeUnit.SECONDS));
+            a.ws.abort();
+            b.ws.abort();
+            Thread.sleep(300);
+            Client c = open(WsRouter.APISOCKET_PATH, basic("bob", "bob-password-22"));
+            c.ws.abort();
+        } finally {
+            release.countDown();
+            port = main;
+            s.stop();
+        }
     }
 
     @Test

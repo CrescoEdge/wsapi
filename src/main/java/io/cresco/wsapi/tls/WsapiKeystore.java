@@ -94,6 +94,8 @@ public final class WsapiKeystore {
     public static final String PASSWORD_FILE = "ws.keystore.pass";
     public static final String CERT_PEM = "ws.crt.pem";
     public static final String FINGERPRINT_FILE = "ws.fingerprint";
+    /** Marks a legacy keystore kept by {@code wsapi_tls_keep_legacy_keystore=true}: its certificate's SHA-384. */
+    public static final String LEGACY_KEPT_MARKER = "ws.keystore.legacy-kept";
     public static final String ALIAS = "wsapi";
     /** The password older wsapi builds used for every keystore: opens an existing one, never protects one. */
     static final String LEGACY_DEFAULT_PASSWORD = "cresco";
@@ -124,6 +126,7 @@ public final class WsapiKeystore {
         String region = "unknown", agent = "unknown", plugin = "unknown";
         boolean hostSans = true;
         boolean replaceNonCompliant = false;
+        boolean keepLegacy = false;
 
         public Settings dataDir(Path p) { dataDir = p; return this; }
         public Settings operatorKeystore(Path p) { operatorKeystore = p; return this; }
@@ -137,6 +140,8 @@ public final class WsapiKeystore {
         public Settings hostSans(boolean b) { hostSans = b; return this; }
         /** Replace an existing certificate that is below the crypto policy ({@code wsapi_tls_replace_noncompliant}). */
         public Settings replaceNonCompliant(boolean b) { replaceNonCompliant = b; return this; }
+        /** Keep a legacy keystore whose key must be presumed exposed ({@code wsapi_tls_keep_legacy_keystore}). */
+        public Settings keepLegacy(boolean b) { keepLegacy = b; return this; }
     }
 
     /** The loaded identity. */
@@ -233,13 +238,28 @@ public final class WsapiKeystore {
             if (filePassword.length == 0) throw new Refused(passFile + " is empty; delete it and " + ks + " to make a new keystore");
         }
 
+        String replacedOld = null;
         if (Files.exists(ks)) {
+            boolean readableByOthers = readableByOthers(ks);
             Opened o = openExisting(ks, configured, filePassword, passFile);
             ServedIdentity id = servedIdentity(o.store, o.password, ks);
             X509Certificate cert = id.cert;
             String policy = policyProblem(cert);
+            Path marker = s.dataDir.resolve(LEGACY_KEPT_MARKER);
+            String fp384 = fingerprint(cert, "SHA-384");
+            // Older wsapi builds protected every keystore with the published password "cresco", usually in a file other
+            // users could read: such a key must be presumed exposed. It is replaced unless the operator keeps it.
+            String exposed = LEGACY_DEFAULT_PASSWORD.equals(new String(o.password)) ? "it was protected by the published default password"
+                    : readableByOthers ? "its file was readable by other users"
+                    : markerNames(marker, fp384) ? "it is a legacy keystore kept by wsapi_tls_keep_legacy_keystore" : null;
             String replaceWhy = expired(cert) ? "its certificate expired on " + cert.getNotAfter().toInstant()
+                    : (exposed != null && !s.keepLegacy) ? exposed + ", so its key must be presumed exposed"
                     : (policy != null && s.replaceNonCompliant) ? policy + " (wsapi_tls_replace_noncompliant=true)" : null;
+            if (replaceWhy == null && exposed != null) {
+                writePublicQuietly(marker, fp384 + "\n");
+                log.warn("wsapi TLS keystore " + ks + " is KEPT although " + exposed + " (wsapi_tls_keep_legacy_keystore=true): "
+                        + "anyone who had that key can impersonate this wsapi. Remove the setting to replace it at the next start");
+            }
             if (replaceWhy == null) {
                 char[] password = o.password;
                 boolean weak = !strong(o.password);
@@ -265,12 +285,15 @@ public final class WsapiKeystore {
                         + "); delete " + ks + " to make a new one, then re-pin clients");
                 return new Material(id.store, password, cert, ks, false);
             }
-            log.warn("wsapi TLS keystore " + ks + " is replaced: " + replaceWhy + " (old certificate " + fingerprint(cert, "SHA-384") + ")");
+            log.warn("wsapi TLS keystore " + ks + " is replaced: " + replaceWhy + " (old certificate " + fp384 + ")");
+            replacedOld = fp384;
             try {
                 Files.delete(ks);
+                Files.deleteIfExists(marker);
             } catch (IOException e) {
                 throw new Refused("cannot remove the wsapi keystore " + ks + " to replace it: " + e.getMessage(), e);
             }
+            if (exposed != null) filePassword = null;            // a fresh random password for the new key too
         }
 
         char[] password;
@@ -301,6 +324,11 @@ public final class WsapiKeystore {
             throw new Refused("could not make the wsapi TLS keystore " + ks + ": " + e, e);
         }
         log.info("wsapi TLS keystore created: " + ks + " (" + describeKey(cert.getPublicKey()) + ", " + cert.getSigAlgName() + ")");
+        if (replacedOld != null) {
+            log.warn("wsapi TLS certificate REPLACED: the new fingerprint is " + fingerprint(cert, "SHA-384") + " ("
+                    + fingerprint(cert, "SHA-256") + "), was " + replacedOld + ". Give every client the new value from "
+                    + s.dataDir.resolve(FINGERPRINT_FILE) + " (or the new " + CERT_PEM + ")");
+        }
         return new Material(store, password, cert, ks, true);
     }
 
@@ -361,6 +389,32 @@ public final class WsapiKeystore {
             throw r;
         } catch (Exception e) {
             throw new Refused("could not re-save the wsapi keystore " + ks + ": " + e.getMessage(), e);
+        }
+    }
+
+    private static boolean readableByOthers(Path f) {
+        try {
+            java.util.Set<java.nio.file.attribute.PosixFilePermission> p = Files.getPosixFilePermissions(f);
+            return p.contains(java.nio.file.attribute.PosixFilePermission.GROUP_READ)
+                    || p.contains(java.nio.file.attribute.PosixFilePermission.OTHERS_READ);
+        } catch (UnsupportedOperationException | IOException e) {
+            return false;
+        }
+    }
+
+    private static boolean markerNames(Path marker, String fp384) {
+        try {
+            return Files.exists(marker) && Files.readString(marker).strip().equals(fp384);
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    private static void writePublicQuietly(Path f, String text) {
+        try {
+            writePublic(f, text);
+        } catch (IOException ignore) {
+            // the warning still says it all
         }
     }
 
