@@ -142,6 +142,8 @@ public class LogStreamerWsHandler extends SimpleChannelInboundHandler<WebSocketF
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, WebSocketFrame frame) {
         if (!(frame instanceof TextWebSocketFrame)) return;
+        // a credential revoked or changed since the upgrade: no configuration, the connection is being closed
+        if (gate != null && !gate.admit(ctx.channel(), principal)) return;
         if (!principal.isAdmin()) {
             // log levels and log routing are an admin's: a user raising io.cresco to Trace read other users' messages
             logger.warn("LogStreamerWsHandler: refused a log configuration from " + principal + " (admin only)");

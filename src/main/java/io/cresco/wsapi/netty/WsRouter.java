@@ -131,6 +131,118 @@ public class WsRouter extends SimpleChannelInboundHandler<FullHttpRequest> {
             connectionsByCaller.computeIfPresent(p.key(), (k, n) -> n.decrementAndGet() <= 0 ? null : n);
         }
 
+        // ---- revocation: an open connection lives only while its credential would still be accepted ----
+
+        /** One open, authenticated connection. */
+        static final class Open {
+            final Authenticator.Principal principal;
+            final String path, source;
+
+            Open(Authenticator.Principal principal, String path, String source) {
+                this.principal = principal;
+                this.path = path;
+                this.source = source;
+            }
+        }
+
+        /** Default and bounds of how often every open connection's credential is checked again (ms). */
+        static final long DEFAULT_REVOCATION_CHECK_MS = 1000L, MIN_REVOCATION_CHECK_MS = 250L, MAX_REVOCATION_CHECK_MS = 5000L;
+        /** The close reason a client sees (WebSocket 1008): never which part of a credential changed. */
+        static final String REVOKED_REASON = "credentials revoked or changed: authenticate again";
+        /** Connections closed because their credential was revoked or changed (since start). */
+        public static final java.util.concurrent.atomic.AtomicLong REVOKED_CONNECTIONS = new java.util.concurrent.atomic.AtomicLong();
+
+        private static final io.netty.util.AttributeKey<Boolean> REVOKED = io.netty.util.AttributeKey.valueOf("wsapi.revoked");
+        private final Map<io.netty.channel.Channel, Open> open = new ConcurrentHashMap<>();
+        private volatile long revocationCheckMs = DEFAULT_REVOCATION_CHECK_MS;
+        private java.util.concurrent.ScheduledExecutorService revoker;      // started with the first connection
+        private boolean stopped;
+
+        /** How often every open connection's credential is checked again ({@code wsapi_revocation_check_ms}, 250-5000). */
+        public Gate revocationCheckMs(long ms) {
+            this.revocationCheckMs = Math.max(MIN_REVOCATION_CHECK_MS, Math.min(MAX_REVOCATION_CHECK_MS, ms));
+            return this;
+        }
+
+        /** Track an authenticated connection until it closes, and check its credential again from now on. */
+        void register(io.netty.channel.Channel ch, Authenticator.Principal p, String path, String source) {
+            open.put(ch, new Open(p, path, source));
+            ch.closeFuture().addListener(f -> open.remove(ch));
+            startRevoker();
+        }
+
+        private synchronized void startRevoker() {
+            if (revoker != null || stopped) return;
+            revoker = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "wsapi-revocation");
+                t.setDaemon(true);
+                return t;
+            });
+            revoker.scheduleWithFixedDelay(this::sweep, revocationCheckMs, revocationCheckMs, TimeUnit.MILLISECONDS);
+        }
+
+        /**
+         * Close every open connection whose credential was revoked or changed ({@link Authenticator#revocation}), with
+         * WebSocket status 1008; one WARN line per caller and reason.
+         */
+        void sweep() {
+            try {
+                Map<String, int[]> closed = new java.util.LinkedHashMap<>();
+                for (Map.Entry<io.netty.channel.Channel, Open> e : open.entrySet()) {
+                    Open o = e.getValue();
+                    String why;
+                    try {
+                        why = authenticator.revocation(o.principal);
+                    } catch (RuntimeException failed) {
+                        why = "its credential could not be checked again (" + failed.getClass().getSimpleName() + ")";
+                    }
+                    if (why == null) continue;
+                    if (closeRevoked(e.getKey())) {
+                        closed.computeIfAbsent(o.principal + " (" + o.principal.credentialName() + "): " + why, k -> new int[1])[0]++;
+                    }
+                }
+                for (Map.Entry<String, int[]> c : closed.entrySet()) {
+                    warn("wsapi closed " + c.getValue()[0] + " open connection(s) of " + c.getKey());
+                }
+            } catch (RuntimeException e) {
+                warn("wsapi revocation check failed: " + e);
+            }
+        }
+
+        /**
+         * May {@code p} still be served on {@code ch}? Checked for every message a client sends, and before an RPC's reply is
+         * written: false (and the connection is being closed) once its credential was revoked or changed.
+         */
+        boolean admit(io.netty.channel.Channel ch, Authenticator.Principal p) {
+            String why;
+            try {
+                why = authenticator.revocation(p);
+            } catch (RuntimeException failed) {
+                why = "its credential could not be checked again (" + failed.getClass().getSimpleName() + ")";
+            }
+            if (why == null) return true;
+            Open o = ch == null ? null : open.get(ch);
+            if (ch != null && closeRevoked(ch)) {
+                warn("wsapi closed " + (o == null ? "a connection" : o.path + " from " + o.source) + " of " + p + " ("
+                        + p.credentialName() + "): " + why);
+            }
+            return false;
+        }
+
+        /** Close a connection whose credential was revoked: 1008 with {@link #REVOKED_REASON}. True when this call closed it. */
+        private boolean closeRevoked(io.netty.channel.Channel ch) {
+            open.remove(ch);
+            if (ch.attr(REVOKED).setIfAbsent(Boolean.TRUE) != null) return false;      // already being closed
+            REVOKED_CONNECTIONS.incrementAndGet();
+            ch.writeAndFlush(new io.netty.handler.codec.http.websocketx.CloseWebSocketFrame(
+                    io.netty.handler.codec.http.websocketx.WebSocketCloseStatus.POLICY_VIOLATION, REVOKED_REASON))
+                    .addListener(ChannelFutureListener.CLOSE);
+            return true;
+        }
+
+        /** Open connections being checked (for tests and the health of the check). */
+        int openConnections() { return open.size(); }
+
         int connections(Authenticator.Principal p) {
             java.util.concurrent.atomic.AtomicInteger n = connectionsByCaller.get(p.key());
             return n == null ? 0 : n.get();
@@ -204,7 +316,14 @@ public class WsRouter extends SimpleChannelInboundHandler<FullHttpRequest> {
             if (logger != null) logger.warn(msg);
         }
 
-        public void shutdown() { pool.shutdownNow(); }
+        public void shutdown() {
+            pool.shutdownNow();
+            synchronized (this) {
+                stopped = true;
+                if (revoker != null) revoker.shutdownNow();
+                revoker = null;
+            }
+        }
     }
 
     private final PluginBuilder plugin;
@@ -310,6 +429,7 @@ public class WsRouter extends SimpleChannelInboundHandler<FullHttpRequest> {
                 return;
             }
             ctx.channel().closeFuture().addListener(f -> gate.closeConnection(p));
+            gate.register(ctx.channel(), p, path, source);     // checked again until it closes: revocation reaches it
             gate.accepted(source, path, p);
 
             io.netty.channel.ChannelHandler endpoint;

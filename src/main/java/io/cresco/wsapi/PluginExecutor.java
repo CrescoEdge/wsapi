@@ -62,6 +62,7 @@ public class PluginExecutor implements Executor {
                 metricEngine.setGauge("wsapi.auth.failures", "failed wsapi authentications since start", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
                 metricEngine.setGauge("wsapi.auth.servicekey.failures", "wrong service keys since start (an alarm is logged at a guessing rate)", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
                 metricEngine.setGauge("wsapi.auth.refused", "authentications refused before they were checked (429) since start", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
+                metricEngine.setGauge("wsapi.auth.revoked.connections", "open connections closed because their credential was revoked or changed, since start", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
                 metricEngine.setGauge("wsapi.dataplane.egress.max.pending.bytes", "largest egress backlog one WS consumer reached since start (bytes)", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
             }
             metricEngine.updateIntGauge("wsapi.dataplane.connections", DataPlaneWsHandler.ACTIVE_CONNECTIONS.get());
@@ -73,6 +74,7 @@ public class PluginExecutor implements Executor {
             metricEngine.updateLongGauge("wsapi.auth.failures", io.cresco.wsapi.auth.AuthRateLimiter.FAILURES.get());
             metricEngine.updateLongGauge("wsapi.auth.servicekey.failures", io.cresco.wsapi.auth.AuthRateLimiter.SERVICE_KEY_FAILURES.get());
             metricEngine.updateLongGauge("wsapi.auth.refused", io.cresco.wsapi.auth.AuthRateLimiter.REFUSED.get());
+            metricEngine.updateLongGauge("wsapi.auth.revoked.connections", io.cresco.wsapi.netty.WsRouter.Gate.REVOKED_CONNECTIONS.get());
             return gson.toJson(metricEngine.getAllMetrics());
         } catch (Exception ex) {
             logger.error("getMetricsJson() " + ex.getMessage());
