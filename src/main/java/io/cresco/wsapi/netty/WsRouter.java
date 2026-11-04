@@ -157,7 +157,7 @@ public class WsRouter extends SimpleChannelInboundHandler<FullHttpRequest> {
 
             io.netty.channel.ChannelHandler endpoint;
             switch (path) {
-                case DATAPLANE_PATH:   endpoint = new DataPlaneWsHandler(plugin, r.principal); break;
+                case DATAPLANE_PATH:   endpoint = new DataPlaneWsHandler(plugin, r.principal, gate); break;
                 case APISOCKET_PATH:   endpoint = new ApiSocketWsHandler(plugin, r.principal, gate); break;
                 default:               endpoint = new LogStreamerWsHandler(plugin, r.principal, gate); break;
             }

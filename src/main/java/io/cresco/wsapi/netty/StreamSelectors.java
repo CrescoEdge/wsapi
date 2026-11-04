@@ -22,6 +22,11 @@ import java.util.regex.Pattern;
  * {@code IS [NOT] NULL} and a query of {@code <>} terms alone are refused, because each can match
  * every message on the shard ({@code nonexistent IS NULL} selects everything). No parentheses, NOT,
  * LIKE, IN, BETWEEN, arithmetic or escaped quotes.
+ *
+ * <p>A client never receives a process's stdin: every subscription wsapi makes is the client's selector
+ * {@code AND} {@link #NO_STDIN} ({@link #subscriptionSelector}). The executor takes stdin only from messages whose
+ * {@code type} is the runner's unguessable {@code input-<hex>} (or the development-only {@code input}); a subscriber of
+ * the stream would otherwise read every line others type into it, and learn the type that lets it type too.
  */
 public final class StreamSelectors {
 
@@ -41,6 +46,14 @@ public final class StreamSelectors {
     }
 
     public static boolean value(String s) { return s != null && VALUE.matcher(s).matches(); }
+
+    /** Matches no stdin message: no {@code type}, or a {@code type} other than {@code input} and {@code input-*}. */
+    public static final String NO_STDIN = "(type IS NULL OR (type <> 'input' AND type NOT LIKE 'input-%'))";
+
+    /** The selector wsapi subscribes with for a handshake: the client's, narrowed by {@link #NO_STDIN}. */
+    public static String subscriptionSelector(StreamInfo si) {
+        return "(" + selectorFor(si) + ") AND " + NO_STDIN;
+    }
 
     /** The selector for a handshake, or an IllegalArgumentException saying what was refused. */
     public static String selectorFor(StreamInfo si) {

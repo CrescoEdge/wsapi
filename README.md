@@ -100,6 +100,25 @@ the agent's tenant from the controller; until the controller knows it, every cli
 | `wsapi_auth_cache_seconds` | 300 | how long a verified password is remembered; 0 turns it off |
 | `wsapi_auth_threads` / `wsapi_auth_queue` | cores/2 (2-8) / 256 | authentication workers; a full queue answers 503 |
 
+### The dataplane
+
+- **Only callers of the agent's tenant** may open a dataplane stream: the dataplane wsapi reads and writes is that
+  tenant's. Anyone else (an admin of a superuser tenant included) gets the activation reply `status_code=9` and the
+  socket closes.
+- **A subscriber never receives a process's stdin.** Every subscription wsapi makes is the client's selector narrowed
+  by `(type IS NULL OR (type <> 'input' AND type NOT LIKE 'input-%'))`: the executor takes stdin only from messages of
+  its runner's unguessable `type` `input-<hex>` (or the development-only `input`), and a subscriber of the stream
+  would otherwise read what others type into a process, and learn the type that lets it type too. Writing stdin
+  through wsapi is unchanged (open the stream with `input_id=<stdin_type>`).
+- **Map events arrive as JSON text frames.** A dataplane `MapMessage` (for example the executor's `execution_log`,
+  with the exit code, and `delete_exchange` when a process ends) reaches the client as a text frame with the JSON
+  object of its entries (bytes as base64). wsapi used to drop them.
+- **A streamfile transfer ends with a JSON text frame.** Chunks still arrive as binary frames,
+  `[transfer_id][seq_num, 6 digits][payload]`; filerepo's terminal frame arrives as a text frame
+  `{"transfer_id", "transfer_end": "true", "transfer_status", "transfer_desc", "total_bytes", "sha384", ...}`
+  (`transfer_status` 10 complete, 9 cancelled, 8 failed). A client verifies the SHA-384 of what it reassembled before
+  it uses it; both clients' `filerepo.stream_file` do.
+
 ### Operator steps when upgrading
 
 1. Start the upgraded agent. wsapi keeps serving its existing certificate (re-saving an older keystore under a random

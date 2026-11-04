@@ -63,10 +63,12 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
     private final long egressCap;
 
     private final Authenticator.Principal principal;
+    private final WsRouter.Gate gate;
 
-    public DataPlaneWsHandler(PluginBuilder plugin, Authenticator.Principal principal) {
+    public DataPlaneWsHandler(PluginBuilder plugin, Authenticator.Principal principal, WsRouter.Gate gate) {
         this.plugin = plugin;
         this.principal = principal;
+        this.gate = gate;
         this.logger = plugin.getLogger(DataPlaneWsHandler.class.getName(), CLogger.Level.Info);
         this.egressCap = plugin.getConfig().getLongParam("wsapi_dataplane_egress_buffer_bytes", 32L * 1024 * 1024);
         this.egress = new EgressBudget(egressCap,
@@ -146,6 +148,16 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
     }
 
     private void handshake(ChannelHandlerContext ctx, String message) {
+        // the dataplane wsapi reads and writes is this agent's tenant's: only callers of that tenant may use it
+        String tenantRefusal = tenantRefusal(principal, gate == null ? null : gate.authenticator.agentTenant());
+        if (tenantRefusal != null) {
+            logger.warn("DataPlaneWsHandler: handshake refused: " + tenantRefusal);
+            Map<String, String> refused = new java.util.HashMap<>();
+            refused.put("status_code", "9");
+            refused.put("status_desc", "refused: " + tenantRefusal);
+            ctx.writeAndFlush(new TextWebSocketFrame(gson.toJson(refused))).addListener(io.netty.channel.ChannelFutureListener.CLOSE);
+            return;
+        }
         StreamInfo si;
         Map<String, String> mapMessage = null;
         try { mapMessage = gson.fromJson(message, MAP_TYPE); } catch (Exception ignore) {}
@@ -165,7 +177,8 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
         Map<String, String> response = new java.util.HashMap<>();
         String selector;
         try {
-            selector = StreamSelectors.selectorFor(si);
+            // never a stdin message, whatever the client's selector (StreamSelectors.NO_STDIN)
+            selector = StreamSelectors.subscriptionSelector(si);
         } catch (IllegalArgumentException refused) {
             // a selector the client could shape would let it subscribe to other streams: refuse and hang up
             logger.warn("DataPlaneWsHandler: handshake refused: " + refused.getMessage());
@@ -187,6 +200,16 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
                     + response.get("status_desc") + " -- the stream stays open for sending");
         }
         ctx.writeAndFlush(new TextWebSocketFrame(gson.toJson(response)));
+    }
+
+    /** Why {@code caller} may not use the dataplane of an agent in {@code agentTenant}, or null when it may. */
+    static String tenantRefusal(Authenticator.Principal caller, String agentTenant) {
+        if (caller == null) return "no authenticated caller";
+        if (agentTenant == null || agentTenant.isEmpty()) return "this agent's tenant is not known yet";
+        if (!agentTenant.equals(caller.tenant)) {
+            return "the dataplane of tenant " + agentTenant + " is not open to " + caller;
+        }
+        return null;
     }
 
     /**
@@ -260,6 +283,14 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
                         if (msg instanceof TextMessage) {
                             deliver(ch, new TextWebSocketFrame(Unpooled.copiedBuffer(((TextMessage) msg).getText(),
                                     java.nio.charset.StandardCharsets.UTF_8)));
+                        } else if (msg instanceof jakarta.jms.MapMessage) {
+                            // executor exit events and other map events: their entries as JSON (were dropped)
+                            deliver(ch, new TextWebSocketFrame(Unpooled.copiedBuffer(
+                                    DataPlaneFrames.mapJson((jakarta.jms.MapMessage) msg), java.nio.charset.StandardCharsets.UTF_8)));
+                        } else if (DataPlaneFrames.isTransferEnd(msg)) {
+                            // a streamfile terminal frame: its status and SHA-384, for the client to verify the transfer
+                            deliver(ch, new TextWebSocketFrame(Unpooled.copiedBuffer(
+                                    DataPlaneFrames.transferEndJson(msg), java.nio.charset.StandardCharsets.UTF_8)));
                         } else if (msg instanceof BytesMessage) {
                             String transferId = msg.getStringProperty("transfer_id");
                             long dataSize = ((BytesMessage) msg).getBodyLength();
