@@ -59,6 +59,9 @@ public class PluginExecutor implements Executor {
                 // no silent egress loss: every frame not delivered to a WS consumer is counted here
                 metricEngine.setGauge("wsapi.dataplane.egress.dropped", "dataplane frames dropped at WS egress: a consumer more than wsapi_dataplane_egress_buffer_bytes behind (total since start)", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
                 metricEngine.setGauge("wsapi.dataplane.egress.pending.bytes", "dataplane bytes queued to WS consumers, not yet written", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
+                metricEngine.setGauge("wsapi.auth.failures", "failed wsapi authentications since start", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
+                metricEngine.setGauge("wsapi.auth.servicekey.failures", "wrong service keys since start (an alarm is logged at a guessing rate)", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
+                metricEngine.setGauge("wsapi.auth.refused", "authentications refused before they were checked (429) since start", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
                 metricEngine.setGauge("wsapi.dataplane.egress.max.pending.bytes", "largest egress backlog one WS consumer reached since start (bytes)", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
             }
             metricEngine.updateIntGauge("wsapi.dataplane.connections", DataPlaneWsHandler.ACTIVE_CONNECTIONS.get());
@@ -67,6 +70,9 @@ public class PluginExecutor implements Executor {
             metricEngine.updateLongGauge("wsapi.dataplane.egress.dropped", DataPlaneWsHandler.EGRESS_DROPPED.get());
             metricEngine.updateLongGauge("wsapi.dataplane.egress.pending.bytes", DataPlaneWsHandler.EGRESS_PENDING_BYTES.get());
             metricEngine.updateLongGauge("wsapi.dataplane.egress.max.pending.bytes", DataPlaneWsHandler.EGRESS_MAX_PENDING_BYTES.get());
+            metricEngine.updateLongGauge("wsapi.auth.failures", io.cresco.wsapi.auth.AuthRateLimiter.FAILURES.get());
+            metricEngine.updateLongGauge("wsapi.auth.servicekey.failures", io.cresco.wsapi.auth.AuthRateLimiter.SERVICE_KEY_FAILURES.get());
+            metricEngine.updateLongGauge("wsapi.auth.refused", io.cresco.wsapi.auth.AuthRateLimiter.REFUSED.get());
             return gson.toJson(metricEngine.getAllMetrics());
         } catch (Exception ex) {
             logger.error("getMetricsJson() " + ex.getMessage());

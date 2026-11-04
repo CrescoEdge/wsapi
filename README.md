@@ -72,26 +72,41 @@ java -cp wsapi.jar io.cresco.wsapi.auth.CredentialTool revoke <ws.users> <user> 
 java -cp wsapi.jar io.cresco.wsapi.auth.CredentialTool list   <ws.users>
 ```
 
-Failed attempts are limited without letting the limits be turned against real users. A *source* is an IPv4 address or
-an IPv6 /64.
-- 10 failures from a source within 60 s lock it for 60 s (HTTP 429 with `Retry-After`), each repeat lockout doubling
-  up to 15 min; a malformed header counts like any failure, against its source only. A user who has logged in from
-  that source before and has not failed there since is not locked out by others' failures there.
-- A user's success at a source forgives only that user's failures there: an attacker cannot reset its count against a
-  victim by logging in with its own account in between.
-- Per user name, failures give the (user, source) pair growing delays after 3 free failures (1 s, 2 s, 4 s, ... up to
-  15 min), never a lock: the real user at an address of their own is never refused because of failures elsewhere.
-  While a user name has 50 failures within the window from all sources, each new source gets one free failure.
-- The service key also has a fabric-wide count: after 30 failures within the window from all sources together, sources
-  that have not used the key successfully in the last day are refused key attempts, for growing periods.
+Failed attempts are limited without letting the limits be turned against real users. A *source* is a bucket and an
+exact address: the bucket is an IPv4 address or an IPv6 prefix (a /64 by default, `wsapi_auth_ipv6_prefix_bits`; set
+128 where one /64 is shared by unrelated clients, e.g. at a hosting provider). An IPv4 client behind NAT64 (64:ff9b::/96,
+64:ff9b:1::/96) or IPv4-mapped is its IPv4 address, not one /64 shared by every IPv4 client of the NAT64.
+- **Known-good sources.** A user's successful login remembers that user's exact address and its bucket for
+  `wsapi_auth_known_good_days` (30). They are kept across restarts in the plugin data directory (`ws.auth.known`, with
+  its key in `ws.auth.known.key`, both owner-only), as HMAC-SHA-256 ids under a per-installation key, so the file names
+  no user and no address; a file that is not owner-only is not trusted. An exact known-good address is never delayed
+  by anyone else's failures: a stranger on the same LAN or /64 guessing a user's password cannot keep that user out.
+- **Per bucket**, 10 failures within 60 s lock it for 60 s (HTTP 429 with `Retry-After`), each repeat lockout doubling
+  up to 15 min (exact known-good addresses excepted); a malformed header counts here only. A user's success forgives
+  only that user's own failures there: an attacker cannot reset its count by logging in with its own account.
+- **Per (user, address)**, failures give growing delays after 3 free failures (1 s, 2 s, 4 s, ... up to 15 min) for that
+  address only, never a lock elsewhere.
+- **A user's unknown sources share a budget**: at most 50 failures (`wsapi_auth_max_user_failures`) per window from
+  sources not known for that user, then unknown sources are refused for the rest of the window, so a guesser with any
+  number of addresses gets at most 50 password checks per minute against one user. New addresses in a bucket the user
+  is known in (a second device on the LAN, an IPv6 privacy address) share a smaller budget per (user, bucket), 10 per
+  window, so a stranger there cannot rotate addresses without bound. Known hosts are never refused by either budget;
+  only a new host of that user waits while an attack runs.
+- **The service key** (at least 128 bits; weaker keys are refused) is limited per bucket and per address, never by a
+  fabric-wide gate: wrong keys from strangers never lock the real key out of a new host (a new tool, a new container,
+  every host after a restart). Wrong keys are a metric (`wsapi.auth.servicekey.failures`) and, at 30 or more within a
+  window from anywhere, an ERROR `wsapi ALARM: ... wrong service keys ... someone is guessing it` (once per window).
 - The tables are bounded (least recently used entries forgotten); a full table never refuses a newcomer.
+  `wsapi.auth.failures` and `wsapi.auth.refused` count failures and 429s.
 
 Admission is fair and bounded. Everything that needs no PBKDF2 (refusals, malformed headers, the service key, a
 remembered password) is decided on the network thread; an unremembered password waits for the bounded PBKDF2 pool, at
 most `wsapi_auth_pending_per_source` per source at a time, so one source cannot fill it. A verified password is
 remembered for `wsapi_auth_cache_seconds` (an HMAC under a per-process random key, never the password). A user may hold
 at most `wsapi_max_connections_per_user` connections (`wsapi_max_connections_per_admin` for admins); more are refused
-(429). wsapi never sends a `WWW-Authenticate` challenge, and refuses (403) a request carrying a browser `Origin` other
+(429, the reason naming the cap). The service key's connection and RPC limits count per source host
+(`wsapi_service_key_limits_per_source`, on by default): every tool on every host that shares the key used to share one
+admin budget, so one busy tool could starve the others. wsapi never sends a `WWW-Authenticate` challenge, and refuses (403) a request carrying a browser `Origin` other
 than wsapi's own address or one in `wsapi_allowed_origins`, so a web page cannot open wsapi with a browser's cached
 credentials. Refusals are logged with the source, the user name and the reason; secrets never are.
 
@@ -104,6 +119,10 @@ other regions): a message to another region, or to a global controller in anothe
 
 **The log stream.** Only an admin (or the service key) may set log levels or log routing; a `user`'s configuration lines
 are refused, and its log stream never carries lines below `Warn` (Info, Debug and Trace can carry message contents).
+A configuration line's RPCs (`setlogdp`, `setloglevel`) run on a small bounded pool, never a network thread, each
+waiting at most 10 s for the named agent; one configuration at a time per stream, and a line sent meanwhile, or when the
+pool is full, is answered `busy: ...; retry shortly`. A line naming an agent that does not answer used to hold its
+event loop, and every client on it, for 30 s.
 In every forwarded log line, message parameters keep their values only when they are on an allowlist of routing and
 status names (`action`, `status`, `dst_region`, ...); every other parameter's value, whatever its name, is
 `<redacted>`.
@@ -129,8 +148,11 @@ the agent's tenant from the controller; until the controller knows it, every cli
 | `wsapi_users_file` | `ws.users` in the plugin data directory | the credential file |
 | `cresco_service_key` / `_file` | | the legacy service key |
 | `wsapi_service_key_enabled` | true | accept the service key |
-| `wsapi_auth_max_failures` | 10 | failures per source (IPv4 address, IPv6 /64) per window before a lockout |
-| `wsapi_auth_max_user_failures` | 50 | failures per user name per window that mark a distributed guess |
+| `wsapi_auth_max_failures` | 10 | failures per bucket (IPv4 address, IPv6 prefix) per window before a lockout; also the budget of new addresses in a bucket a user is known in |
+| `wsapi_auth_max_user_failures` | 50 | failures per user name per window from sources not known for that user |
+| `wsapi_auth_ipv6_prefix_bits` | 64 | the IPv6 prefix one bucket aggregates (32 to 128; 128 where a /64 is shared) |
+| `wsapi_auth_known_good_days` | 30 | how long a successful login keeps its address and bucket known good (kept across restarts) |
+| `wsapi_service_key_limits_per_source` | true | count the service key's connection and RPC limits per source host |
 | `wsapi_auth_window_seconds` | 60 | the counting window |
 | `wsapi_auth_lockout_seconds` / `wsapi_auth_max_lockout_seconds` | 60 / 900 | first lockout, and the cap of the doubling |
 | `wsapi_auth_cache_seconds` | 300 | how long a verified password is remembered; 0 turns it off |
@@ -163,15 +185,29 @@ A message over its endpoint's cap, in one frame or in fragments, closes the conn
   handshake that would write stdin (`io_type_key=type` with `input_id` `input` or `input-*`) is refused for every
   caller, admins included, with that reason (`status_code=9`). It used to be accepted from admins, and the hardened
   executor would silently drop what it carried.
+- **Every routing property is checked.** A handshake's `io_type_key` may not name its `ident_key`'s property (for
+  everyone; the second value replaced the stream the handshake was checked for, so a user wrote into another user's
+  stream), and a `user` may set only `type` beside its own `stream_name`, so no other subscriber's selector
+  (`gk_stream='...'`) can be fed by a user's messages. A selector handshake only receives.
+- **Envelope frames: who wrote it.** A handshake with `"envelope": "true"` gets every message with its verified writer.
+  Text, map and streamfile terminal messages arrive as JSON text frames
+  `{"kind": "text"|"map"|"transfer_end", "writer", "writer_roles", "writer_tenant", "properties": {...},
+  "text": "..." | "map": {...}}`; data messages as binary frames: a 4-byte big-endian header length, the UTF-8 JSON
+  header (`"kind": "bytes"`, the writer, the properties), then the payload as published. The writer is the API user
+  wsapi published for (`api:<tenant>/<user>`, which the controller keeps only from wsapi and only for its tenant's
+  users), else the bundle or controller its controller stamped (`cresco_caller`, e.g. the executor plugin); null when
+  there is no stamp. So a client tells a process's real `execution_log` (a map, written by the executor) from a user's
+  text that looks like one. Without `envelope` frames are as before.
 - **Reserved properties.** No client may name a property infrastructure writes as its `ident_key` or `io_type_key`:
   `cresco_*`, `transfer_*`, `seq_num`, `offset`, `total_bytes`, `sha384`, `start_byte`, `byte_length`, `dp_bytes`,
   `region_id`, `agent_id`, `plugin_id`, `pluginname`, `event`, `loglevel`, `logid`, `session_id`. Everything a client
   publishes carries its verified writer, `cresco_writer=api:<tenant>/<user>` and `cresco_writer_roles=<role>`.
 - A refused handshake answers `status_code=9` with the reason; the next text frame is a new handshake, and the third
   refusal closes the connection.
-- **A subscriber never receives a process's stdin.** Every subscription wsapi makes is the client's selector narrowed
-  by `(type IS NULL OR (type <> 'input' AND type NOT LIKE 'input-%'))`, so no stdin frame an older executor or another
-  publisher puts on the dataplane reaches a client.
+- **wsapi subscribes with the client's selector, checked, and nothing else.** The controller refuses any dataplane
+  selector that names a process's stdin (`'input'`, `'input-...`) from every bundle but the executor; that guard is the
+  single enforcement point. wsapi used to append `AND (type IS NULL OR (type <> 'input' ...))` to every subscription,
+  which the hardened controller refuses, so no API client could receive.
 - **Map events arrive as JSON text frames.** A dataplane `MapMessage` (for example the executor's `execution_log`,
   with the exit code, and `delete_exchange` when a process ends) reaches the client as a text frame with the JSON
   object of its entries (bytes as base64). wsapi used to drop them.

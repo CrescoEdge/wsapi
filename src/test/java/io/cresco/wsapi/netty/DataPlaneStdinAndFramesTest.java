@@ -43,29 +43,25 @@ class DataPlaneStdinAndFramesTest {
         return si;
     }
 
+    /** The controller's StdinGuard pattern (controller hardening 7d7cfd5): a selector it matches is refused. */
+    static final java.util.regex.Pattern CONTROLLER_NAMES_STDIN = java.util.regex.Pattern.compile("'input(-|'|%|_)",
+            java.util.regex.Pattern.CASE_INSENSITIVE);
+
     @Test
-    void noSubscriptionEverReceivesStdinWhateverItsSelector() throws Exception {
-        String hex = "input-0123456789abcdef0123456789abcdef";
+    void wsapiSubscribesWithTheClientsSelectorOnlyAndNeverNamesStdin() throws Exception {
         String[] subscriptions = {
                 StreamSelectors.subscriptionSelector(json("stream_name", "runner1")),
                 StreamSelectors.subscriptionSelector(new StreamInfo("t", "stream_name='runner1'")),
                 StreamSelectors.subscriptionSelector(new StreamInfo("t", "stream_name='runner1' AND type <> 'output'")),
-                StreamSelectors.subscriptionSelector(new StreamInfo("t", "type='" + hex + "'")),
-                StreamSelectors.subscriptionSelector(json("type", hex)),
-                StreamSelectors.subscriptionSelector(new StreamInfo("t", "type='input'")),
-        };
+                StreamSelectors.subscriptionSelector(new StreamInfo("t", "stream_name='gk-1' AND type='data'"))};
+        assertEquals("stream_name='runner1'", subscriptions[0]);
+        assertEquals("stream_name='runner1'", subscriptions[1]);
         for (String sel : subscriptions) {
-            assertFalse(matches(sel, msg("runner1", hex)), sel + " received a runner's stdin");
-            assertFalse(matches(sel, msg("runner1", "input")), sel + " received legacy stdin");
+            assertFalse(CONTROLLER_NAMES_STDIN.matcher(sel).find(), "the controller would refuse " + sel);
         }
-        // everything else on the stream still arrives
         String plain = subscriptions[0];
         assertTrue(matches(plain, msg("runner1", "output")));
-        assertTrue(matches(plain, msg("runner1", "error")));
-        assertTrue(matches(plain, msg("runner1", "event")));
         assertTrue(matches(plain, msg("runner1", null)), "a message without a type");
-        assertTrue(matches(plain, msg("runner1", "in")), "the README's own input_id");
-        assertTrue(matches(plain, msg("runner1", "inputs")), "only input and input-* are stdin");
         assertFalse(matches(plain, msg("runner2", "output")), "still only the named stream");
         // the client's own selector rules are unchanged: a refused query is still refused
         assertThrows(IllegalArgumentException.class, () -> StreamSelectors.subscriptionSelector(new StreamInfo("t", "a='1' OR b='2'")));

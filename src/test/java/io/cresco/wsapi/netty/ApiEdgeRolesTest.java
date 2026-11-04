@@ -3,6 +3,7 @@ package io.cresco.wsapi.netty;
 import com.google.gson.Gson;
 import io.cresco.library.messaging.MsgEvent;
 import io.cresco.library.plugin.PluginBuilder;
+import io.cresco.wsapi.auth.AuthRateLimiter;
 import io.cresco.wsapi.auth.Authenticator;
 import io.cresco.wsapi.websockets.StreamInfo;
 import io.netty.channel.embedded.EmbeddedChannel;
@@ -117,9 +118,8 @@ class ApiEdgeRolesTest {
         assertEquals("api:tenant-a/bob", m.getStringProperty("cresco_writer"));
         assertEquals("user", m.getStringProperty("cresco_writer_roles"));
         assertEquals("u:bob:s", m.getStringProperty("stream_name"));
-        // the subscription bob made: his stream only, never stdin
-        String sel = rec.selectors.get(0);
-        assertTrue(sel.contains("stream_name='u:bob:s'") && sel.contains(StreamSelectors.NO_STDIN), sel);
+        // the subscription bob made: his stream only
+        assertEquals("stream_name='u:bob:s'", rec.selectors.get(0));
     }
 
     @Test
@@ -155,6 +155,9 @@ class ApiEdgeRolesTest {
         EmbeddedChannel admin = new EmbeddedChannel(new LogStreamerWsHandler(plugin, principal("tenant-a", "alice", "admin", List.of()),
                 ReviewApiDataplaneTest.gate(plugin, rpcs)));
         admin.writeInbound(new TextWebSocketFrame("region-1,agent-1,Info,io.cresco"));
+        // configuration runs off the event loop (LogStreamerWsHandler.CONFIG_POOL)
+        long until = System.currentTimeMillis() + 5_000;
+        while (rpcs.size() < 2 && System.currentTimeMillis() < until) Thread.sleep(20);
         List<String> actions = new ArrayList<>();
         for (Object[] r : rpcs) actions.add(((MsgEvent) r[0]).getParam("action"));
         assertEquals(List.of("setlogdp", "setloglevel"), actions);
@@ -180,11 +183,22 @@ class ApiEdgeRolesTest {
 
     @Test
     void failuresCountPerIpv4AddressAndPerIpv6Slash64() throws Exception {
-        assertEquals("2001:db8:aa:bb::/64", source("2001:db8:aa:bb::1"));
-        assertEquals("2001:db8:aa:bb::/64", source("2001:db8:aa:bb:ffff:1:2:3"));
-        assertNotEquals(source("2001:db8:aa:bb::1"), source("2001:db8:aa:bc::1"));
+        assertEquals("2001:db8:aa:bb::/64 2001:db8:aa:bb:0:0:0:1", source("2001:db8:aa:bb::1"), "the bucket, then the exact address");
+        assertEquals("2001:db8:aa:bb::/64", AuthRateLimiter.bucket(source("2001:db8:aa:bb:ffff:1:2:3")));
+        assertNotEquals(AuthRateLimiter.bucket(source("2001:db8:aa:bb::1")), AuthRateLimiter.bucket(source("2001:db8:aa:bc::1")));
         assertEquals("192.0.2.7", source("192.0.2.7"));
         assertEquals("192.0.2.7", source("::ffff:192.0.2.7"), "an IPv4-mapped address is its IPv4 address");
+        assertEquals("192.0.2.7", source("64:ff9b::c000:207"), "NAT64 (64:ff9b::/96): the IPv4 client, not a /64 of all of them");
+        assertEquals("198.51.100.9", source("64:ff9b:1::c633:6409"), "local-use NAT64 (64:ff9b:1::/96)");
+        assertEquals("2001:db8:aa:bb::/64", AuthRateLimiter.bucket("2001:db8:aa:bb::99"), "the limiter aggregates a bare address too");
+        try {
+            io.cresco.wsapi.auth.Sources.ipv6PrefixBits(128);
+            assertEquals("2001:db8:aa:bb:0:0:0:1", source("2001:db8:aa:bb::1"), "a shared /64: count each address");
+            io.cresco.wsapi.auth.Sources.ipv6PrefixBits(56);
+            assertEquals("2001:db8:aa:0:0:0:0:0/56 2001:db8:aa:bb:0:0:0:1", source("2001:db8:aa:bb::1"));
+        } finally {
+            io.cresco.wsapi.auth.Sources.ipv6PrefixBits(64);
+        }
     }
 
     @Test
