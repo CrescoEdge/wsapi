@@ -195,8 +195,8 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
     /**
      * What a {@code user} may do on the dataplane (admins and the service key are not limited here): only streams it owns
      * ({@code u:<user>:...}) or was granted, named by {@code stream_name}; a raw subscription must anchor
-     * {@code stream_name = '<such a stream>'}; it never writes a process's stdin ({@code type=input*}), and writes
-     * {@code type=output} only on its own streams (on a granted stream that would pose as a process's output).
+     * {@code stream_name = '<such a stream>'}; it writes {@code type=output} only on its own streams (on a granted stream
+     * that would pose as a process's output). Nobody writes stdin on the dataplane ({@link #stdinRefusal}).
      *
      * @return null when allowed, else why not
      */
@@ -217,14 +217,24 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
         if (!owns(p, si.getIdentId())) {
             return p + " may use only its own streams (" + ownPrefix(p) + "...) or streams granted to it, not " + si.getIdentId();
         }
-        if ("type".equals(si.getIoTypeKey()) && si.getInputId() != null) {
-            String t = si.getInputId();
-            if (t.equals("input") || t.startsWith("input-")) return p + " may not write a process's stdin (type=" + t + ")";
-            if (t.equals("output") && !si.getIdentId().startsWith(ownPrefix(p))) {
-                return p + " may write type=output only on its own streams";
-            }
+        if ("type".equals(si.getIoTypeKey()) && "output".equals(si.getInputId()) && !si.getIdentId().startsWith(ownPrefix(p))) {
+            return p + " may write type=output only on its own streams";
         }
         return null;
+    }
+
+    /**
+     * Nobody writes a process's stdin on the dataplane ({@code type=input} or {@code input-*}), an admin included: the
+     * executor takes stdin only from its {@code write_stdin} action (a MsgEvent the caller's identity travels with) and
+     * reads none from the dataplane, so such frames would vanish. Refused with that reason instead.
+     *
+     * @return null when the stream writes no stdin, else why it is refused
+     */
+    static String stdinRefusal(StreamInfo si) {
+        if (si.getIdentKey() == null || !"type".equals(si.getIoTypeKey()) || si.getInputId() == null) return null;
+        String t = si.getInputId();
+        if (!t.equals("input") && !t.startsWith("input-")) return null;
+        return "a process's stdin (type=" + t + ") is not written on the dataplane: use the executor's write_stdin action";
     }
 
     private void handshake(ChannelHandlerContext ctx, String message) {
@@ -254,6 +264,11 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
         } catch (IllegalArgumentException refused) {
             // a selector the client could shape would let it subscribe to other streams, or write reserved properties
             refuse(ctx, refused.getMessage());
+            return;
+        }
+        String stdin = stdinRefusal(si);
+        if (stdin != null) {
+            refuse(ctx, stdin);
             return;
         }
         String roleRefusal = userStreamRefusal(si, principal);

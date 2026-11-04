@@ -54,8 +54,6 @@ class ApiEdgeRolesTest {
                 json("stream_name", "admin-job", "type", "in"),
                 json("job", "u:bob:x", "type", "in"),                           // not named by stream_name
                 json("stream_name", "shared-job-7", "type", "output"),          // posing as a process's output
-                json("stream_name", "u:bob:x", "type", "input-0123"),           // a process's stdin
-                json("stream_name", "u:bob:x", "type", "input"),
                 new StreamInfo("t", "type='output'"),
                 new StreamInfo("t", "seq_num='0'"),
                 new StreamInfo("t", "stream_name='admin-job'"),
@@ -64,7 +62,32 @@ class ApiEdgeRolesTest {
         }
         Authenticator.Principal admin = principal("tenant-a", "alice", "admin", List.of());
         assertNull(DataPlaneWsHandler.userStreamRefusal(new StreamInfo("t", "type='output'"), admin), "admins are not limited by ownership");
-        assertNull(DataPlaneWsHandler.userStreamRefusal(json("stream_name", "runner-1", "type", "input-0123"), admin), "an admin feeds stdin");
+    }
+
+    @Test
+    void nobodyWritesAProcesssStdinOnTheDataplaneAnAdminIncluded() throws Exception {
+        for (String t : new String[]{"input", "input-0123456789abcdef"}) {
+            String why = DataPlaneWsHandler.stdinRefusal(json("stream_name", "runner-1", "type", t));
+            assertNotNull(why, t);
+            assertTrue(why.contains("write_stdin"), why);
+        }
+        assertNull(DataPlaneWsHandler.stdinRefusal(json("stream_name", "runner-1", "type", "in")));
+        assertNull(DataPlaneWsHandler.stdinRefusal(json("stream_name", "runner-1", "type", "inputs")));
+        assertNull(DataPlaneWsHandler.stdinRefusal(json("stream_name", "runner-1", "kind", "input")), "only the executor's type property is stdin");
+        for (String role : new String[]{"admin", "user"}) {
+            ReviewApiDataplaneTest.Recorder rec = new ReviewApiDataplaneTest.Recorder();
+            PluginBuilder plugin = ReviewApiDataplaneTest.plugin(rec);
+            String user = role.equals("admin") ? "root" : "bob";
+            EmbeddedChannel ch = new EmbeddedChannel(new DataPlaneWsHandler(plugin, principal("tenant-a", user, role, List.of()),
+                    ReviewApiDataplaneTest.gate(plugin, new ArrayList<>())));
+            ch.writeInbound(new TextWebSocketFrame(new Gson().toJson(Map.of("ident_key", "stream_name", "ident_id", "u:" + user + ":runner",
+                    "io_type_key", "type", "input_id", "input-0123456789abcdef"))));
+            Map<String, String> r = ReviewApiDataplaneTest.reply(ch);
+            assertEquals("9", r.get("status_code"), role);
+            assertTrue(r.get("status_desc").contains("write_stdin"), r.toString());
+            ch.writeInbound(new TextWebSocketFrame("typed into the process"));
+            assertEquals(0, rec.sent.size(), role + ": nothing was published");
+        }
     }
 
     @Test
