@@ -146,6 +146,15 @@
             <scope>provided</scope>
         </dependency>
 
+        <!-- test scope only: the broker's JMS selector engine and message types, so the tests evaluate the selectors wsapi
+             subscribes with exactly as the broker does. Never embedded in the bundle. -->
+        <dependency>
+            <groupId>org.apache.activemq</groupId>
+            <artifactId>activemq-client</artifactId>
+            <version>6.2.7</version>
+            <scope>test</scope>
+        </dependency>
+
         <!-- test scope only; never embedded in the bundle -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>

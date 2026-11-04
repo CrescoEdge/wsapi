@@ -72,7 +72,8 @@ class WsapiServerAuthTest {
         store = CredentialStore.parse(
                 "alice:tenant-a:admin:" + PasswordHash.create("alice-password-1".toCharArray(), r).encode() + "\n"
                         + "bob:tenant-a:user:" + PasswordHash.create("bob-password-22".toCharArray(), r).encode() + "\n"
-                        + "eve:tenant-b:user:" + PasswordHash.create("eve-password-333".toCharArray(), r).encode() + "\n", "t");
+                        + "eve:tenant-b:user:" + PasswordHash.create("eve-password-333".toCharArray(), r).encode() + "\n"
+                        + "root:ops:admin:" + PasswordHash.create("root-password-4444".toCharArray(), r).encode() + "\n", "t");
         // generous limits here; the rate-limit test runs its own server with strict ones
         server = startServer(new AuthRateLimiter(1000, 1000, 60_000L, 60_000L, 900_000L, 1000, System::currentTimeMillis));
         port = server.boundPort();
@@ -87,8 +88,12 @@ class WsapiServerAuthTest {
     }
 
     static NettyWsServer startServer(AuthRateLimiter limiter) throws Exception {
+        return startServer(limiter, Set.of());
+    }
+
+    static NettyWsServer startServer(AuthRateLimiter limiter, Set<String> superusers) throws Exception {
         Authenticator auth = new Authenticator(() -> store, () -> "the-service-key-value", () -> true, () -> "tenant-a",
-                Set::of, limiter, 300_000L, System::currentTimeMillis);
+                () -> superusers, limiter, 300_000L, System::currentTimeMillis);
         ApiGateway recorder = new ApiGateway() {
             @Override public void send(MsgEvent msg, Authenticator.Principal caller) { sent.add(new Object[]{msg, caller, "send"}); }
             @Override public MsgEvent rpc(MsgEvent msg, long timeoutMs, Authenticator.Principal caller) {
@@ -240,6 +245,30 @@ class WsapiServerAuthTest {
         } finally {
             port = main;
             strict.stop();
+        }
+    }
+
+    @Test
+    void theDataplaneIsOnlyForCallersOfTheAgentsTenant() throws Exception {
+        NettyWsServer su = startServer(new AuthRateLimiter(1000, 1000, 60_000L, 60_000L, 900_000L, 1000, System::currentTimeMillis), Set.of("ops"));
+        int main = port;
+        try {
+            port = su.boundPort();
+            // an admin of a superuser tenant authenticates (it may use the API socket) ...
+            Client api = open(WsRouter.APISOCKET_PATH, basic("root", "root-password-4444"));
+            api.ws.abort();
+            // ... but the dataplane is the agent tenant's
+            Client dp = open(WsRouter.DATAPLANE_PATH, basic("root", "root-password-4444"));
+            dp.ws.sendText("{\"ident_key\":\"stream_name\",\"ident_id\":\"s1\"}", true).get(5, TimeUnit.SECONDS);
+            String reply = dp.got.poll(10, TimeUnit.SECONDS);
+            assertNotNull(reply);
+            Map<?, ?> r = new Gson().fromJson(reply, Map.class);
+            assertEquals("9", r.get("status_code"));
+            assertTrue(String.valueOf(r.get("status_desc")).contains("tenant-a"), reply);
+            dp.ws.abort();
+        } finally {
+            port = main;
+            su.stop();
         }
     }
 
