@@ -31,10 +31,15 @@ import java.util.function.LongSupplier;
  *       failing for that user (max-min fair: one stranger's sources cannot use another source's share), and while all
  *       of them together have had fewer than 2 x {@code maxPerUser} checks. Beyond that the source is delayed, not
  *       refused: its next check comes after {@link #DEFAULT_DELAYED_CHECK_MS} (30 s), doubling with each failed delayed
- *       check up to {@code maxLockoutMs}, and a success resets it. So strangers can slow a user's first login from a new
- *       place to one check per 30 s at worst, never stop it; and one user's password gets at most 2 x {@code maxPerUser}
- *       fair-share checks per window (144,000 a day by default) plus about 100 delayed checks a day per distinct share
- *       source a guesser uses.</li>
+ *       check up to {@code maxLockoutMs}, and a success resets it. So strangers on other networks can slow a user's
+ *       first login from a new place to one check per 30 s at worst, never stop it; and one user's password gets at most
+ *       2 x {@code maxPerUser} fair-share checks per window (144,000 a day by default) plus about 100 delayed checks a day
+ *       per distinct share source a guesser uses.</li>
+ *   <li><b>The limit (documented, by design): a stranger sharing the user's network</b> (the same IPv4 address behind a
+ *       NAT, the same IPv6 bucket) is that user's address bucket and share source too, so by failing for the user it can
+ *       keep the user's password logins from addresses not yet known good there waiting, for as long as it keeps failing.
+ *       The user's exact known-good addresses are never delayed, and API tokens are never limited per user: tools, and
+ *       people on shared networks, use tokens.</li>
  *   <li><b>The service key</b> and API tokens (too long to guess) are limited per bucket and per address only, never
  *       per user; wrong service keys are a metric and an alarm ({@link #serviceKeyAlarm}).</li>
  *   <li><b>Bounded memory, never fail closed.</b> Every table is bounded; a forgotten source or user starts clean.</li>
