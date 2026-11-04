@@ -131,7 +131,7 @@ A message over its endpoint's cap, in one frame or in fragments, closes the conn
 1. Start the upgraded agent. wsapi keeps serving its existing certificate (re-saving an older keystore under a random
    password, WARNING in the log) and writes `ws.crt.pem` and `ws.fingerprint` in its plugin data directory.
 2. Give every client the fingerprint from `ws.fingerprint` (or the log line), or a copy of `ws.crt.pem`. The clients
-   (pycrescolib 1.3.3+, clientlib 1.3 hardening) verify the certificate on every connection by default and send
+   (pycrescolib 1.4.0+, clientlib 1.3 hardening) verify the certificate on every connection by default and send
    nothing to a server they do not trust, so a client without one of these stops connecting:
    - Python (pycrescolib): `clientlib(host, port, service_key, fingerprint="sha384:...")`, or `ca_file="ws.crt.pem"`, or
      set `CRESCO_TLS_FINGERPRINT` / `CRESCO_TLS_CA_FILE` in the environment.
