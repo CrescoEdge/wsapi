@@ -1,6 +1,9 @@
 package io.cresco.wsapi.netty;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.stream.JsonReader;
 import jakarta.jms.BytesMessage;
 import jakarta.jms.JMSException;
 import jakarta.jms.MapMessage;
@@ -107,13 +110,14 @@ final class DataPlaneFrames {
             e.put("text", ((jakarta.jms.TextMessage) msg).getText());
             return GSON.toJson(e);
         }
+        // the map as a JSON tree: its numbers keep their text (through a Map every number became a double, 42 -> 42.0)
         if (msg instanceof MapMessage) {
-            Map<String, Object> e = envelope("map", msg);
-            e.put("map", GSON.fromJson(mapJson((MapMessage) msg), Map.class));
+            JsonObject e = GSON.toJsonTree(envelope("map", msg)).getAsJsonObject();
+            e.add("map", GSON.fromJson(mapJson((MapMessage) msg), JsonElement.class));
             return GSON.toJson(e);
         }
-        Map<String, Object> e = envelope("transfer_end", msg);
-        e.put("map", GSON.fromJson(transferEndJson(msg), Map.class));
+        JsonObject e = GSON.toJsonTree(envelope("transfer_end", msg)).getAsJsonObject();
+        e.add("map", GSON.fromJson(transferEndJson(msg), JsonElement.class));
         return GSON.toJson(e);
     }
 
@@ -132,28 +136,89 @@ final class DataPlaneFrames {
      * A plain map or terminal frame's JSON with its writer added ({@code cresco_writer}, {@code cresco_writer_roles}), so a
      * client without envelope frames can still tell who wrote an event; existing clients ignore the extra keys. A user
      * cannot forge them: a client's text frame that is a JSON object with that key is refused ({@link #claimsWriter}).
+     * The keys are added to the parsed JSON tree, whose numbers keep their original text: a long 42 stays {@code 42} and
+     * 9007199254740993 stays exact (a round trip through a Map made every number a double: 42.0, and large longs rounded).
      */
-    @SuppressWarnings("unchecked")
     static String withWriter(String json, Message msg) throws JMSException {
         Map<String, Object> e = envelope("map", msg);
         if (e.get("writer") == null) return json;
-        Map<String, Object> m = GSON.fromJson(json, Map.class);
-        m.put(WRITER_KEY, e.get("writer"));
-        if (e.get("writer_roles") != null) m.put(WRITER_KEY + "_roles", e.get("writer_roles"));
+        JsonElement tree = GSON.fromJson(json, JsonElement.class);
+        if (!tree.isJsonObject()) return json;
+        JsonObject m = tree.getAsJsonObject();
+        m.addProperty(WRITER_KEY, String.valueOf(e.get("writer")));
+        if (e.get("writer_roles") != null) m.addProperty(WRITER_KEY + "_roles", String.valueOf(e.get("writer_roles")));
         return GSON.toJson(m);
     }
 
-    /** A client's text that is a JSON object with a top-level {@code cresco_writer} (checked only when the text names it). */
+    /** Nesting deeper than this, in a frame that may name the writer key, is refused rather than parsed. */
+    static final int MAX_CHECKED_DEPTH = 1024;
+
+    /**
+     * Does a client's text claim a writer: is it a JSON object with a top-level key {@code cresco_writer...} (any case),
+     * as any client's parser would decode it? The frame is parsed, so a key spelled with escapes
+     * (a backslash-u escape for the underscore, say) is found as what it decodes to, and a key given twice is found whichever copy a
+     * parser keeps. Leniently, as Gson reads it (single quotes, unquoted names, comments), which accepts everything a strict
+     * parser (Python's json, JavaScript's JSON.parse) accepts. Text that cannot decode to the key (checked first, cheaply,
+     * with its backslash-u escapes decoded) is not parsed; such a text nested more than {@link #MAX_CHECKED_DEPTH} levels
+     * deep is refused rather than parsed. Text that is not a JSON object, or not JSON, is no claim.
+     */
     static boolean claimsWriter(String text) {
-        if (text == null || !text.contains(WRITER_KEY)) return false;
-        String t = text.strip();
-        if (!t.startsWith("{")) return false;
-        try {
-            Object o = GSON.fromJson(t, Object.class);
-            return o instanceof Map && (((Map<?, ?>) o).containsKey(WRITER_KEY) || ((Map<?, ?>) o).containsKey(WRITER_KEY + "_roles"));
-        } catch (RuntimeException notJson) {
+        if (text == null) return false;
+        int i = 0, n = text.length();
+        while (i < n && (Character.isWhitespace(text.charAt(i)) || Character.isSpaceChar(text.charAt(i)) || text.charAt(i) == '\ufeff')) i++;
+        if (i >= n || text.charAt(i) != '{') return false;
+        if (!unescaped(text, i).toLowerCase(java.util.Locale.ROOT).contains(WRITER_KEY)) return false;
+        if (depth(text, i) > MAX_CHECKED_DEPTH) return true;
+        try (JsonReader r = new JsonReader(new java.io.StringReader(text.substring(i)))) {
+            r.setLenient(true);
+            r.beginObject();
+            while (r.hasNext()) {
+                if (r.nextName().toLowerCase(java.util.Locale.ROOT).startsWith(WRITER_KEY)) return true;
+                r.skipValue();
+            }
             return false;
+        } catch (java.io.IOException | RuntimeException notAnObject) {
+            return false;                    // no parser makes an object of it (Gson's lenient mode accepts the most)
         }
+    }
+
+    /** The text from {@code from} with its backslash-u escapes decoded (the only escapes that can spell a letter). */
+    private static String unescaped(String t, int from) {
+        StringBuilder sb = new StringBuilder(t.length() - from);
+        for (int i = from; i < t.length(); i++) {
+            char c = t.charAt(i);
+            if (c == '\\' && i + 5 < t.length() && t.charAt(i + 1) == 'u') {
+                try {
+                    sb.append((char) Integer.parseInt(t.substring(i + 2, i + 6), 16));
+                    i += 5;
+                    continue;
+                } catch (NumberFormatException notAnEscape) {
+                    // as it is
+                }
+            }
+            sb.append(c);
+        }
+        return sb.toString();
+    }
+
+    /** The deepest nesting of {@code { [} outside quoted strings (an upper bound: brackets in comments count too). */
+    private static int depth(String t, int from) {
+        int d = 0, max = 0;
+        char quote = 0;
+        for (int i = from; i < t.length(); i++) {
+            char c = t.charAt(i);
+            if (quote != 0) {
+                if (c == '\\') i++;
+                else if (c == quote) quote = 0;
+            } else if (c == '"' || c == '\'') {
+                quote = c;
+            } else if (c == '{' || c == '[') {
+                if (++d > max) max = d;
+            } else if (c == '}' || c == ']') {
+                d--;
+            }
+        }
+        return max;
     }
 
     /** The JSON text of a terminal frame's transfer properties. */
