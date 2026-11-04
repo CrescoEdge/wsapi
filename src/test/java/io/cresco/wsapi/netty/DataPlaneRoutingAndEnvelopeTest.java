@@ -116,17 +116,17 @@ class DataPlaneRoutingAndEnvelopeTest {
 
     @Test
     void theServiceKeysLimitsCountPerSourceHost() throws Exception {
-        String key = "0123456789abcdef0123456789abcdef0123456789abcdef";
-        Authenticator a = new Authenticator(CredentialStore::empty, () -> key, () -> true, () -> "tenant-a", Set::of,
+        String strong = "0123456789abcdef".repeat(3);              // test-only, 48 hex digits
+        Authenticator a = new Authenticator(CredentialStore::empty, () -> strong, () -> true, () -> "tenant-a", Set::of,
                 AuthRateLimiter.defaults(), 0L, System::currentTimeMillis);
-        Authenticator.Principal h1 = a.authenticate(null, key, "192.0.2.10").principal;
-        Authenticator.Principal h2 = a.authenticate(null, key, "2001:db8:1:2::/64 2001:db8:1:2:0:0:0:5").principal;
+        Authenticator.Principal h1 = a.authenticate(null, strong, "192.0.2.10").principal;
+        Authenticator.Principal h2 = a.authenticate(null, strong, "2001:db8:1:2::/64 2001:db8:1:2:0:0:0:5").principal;
         assertNotEquals(h1.key(), h2.key(), "two hosts sharing the key do not share one connection and RPC budget");
         assertEquals("tenant-a/service-key@192.0.2.10", h1.key());
         assertEquals("tenant-a/service-key@2001:db8:1:2::/64", h2.key());
         assertEquals("api:tenant-a/service-key", h1.caller(), "the caller the fabric sees is unchanged");
         a.serviceKeyLimitsPerSource(false);
-        assertEquals("tenant-a/service-key", a.authenticate(null, key, "192.0.2.10").principal.key());
+        assertEquals("tenant-a/service-key", a.authenticate(null, strong, "192.0.2.10").principal.key());
     }
 
     @Test
