@@ -181,7 +181,9 @@ streams (a fair share of the pool), and a line sent meanwhile, or when the pool 
 `busy: ...; retry shortly`. A line naming an agent that does not answer used to hold its event loop, and every client
 on it, for 30 s. When a log stream closes, log streaming is turned off again on every agent it turned it on at, also
 when the configuration is still in flight (it stops at its next step and then undoes) or was refused; it used to stay
-on, mirroring to nobody, until that agent restarted.
+on, mirroring to nobody, until that agent restarted. These undos (each RPC waits at most 10 s) run on their own bounded
+pool (4 threads, 4,096 closed streams waiting), never on the JVM's common ForkJoin pool, which a full configuration pool
+used to fall back to; if even that queue is full, an ERROR names the agents left streaming.
 In every forwarded log line, message parameters keep their values only when they are on an allowlist of routing and
 status names (`action`, `status`, `dst_region`, ...); every other parameter's value, whatever its name, is
 `<redacted>`.
