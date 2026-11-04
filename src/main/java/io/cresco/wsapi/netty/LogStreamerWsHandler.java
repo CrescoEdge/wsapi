@@ -78,6 +78,15 @@ public class LogStreamerWsHandler extends SimpleChannelInboundHandler<WebSocketF
 
     /** One configuration at a time per log stream. */
     private final java.util.concurrent.atomic.AtomicBoolean configuring = new java.util.concurrent.atomic.AtomicBoolean();
+    /** Configuration tasks an admin may hold on the pool at a time, across its streams (a fair share of it). */
+    static final int POOL_SHARE_PER_ADMIN = 2;
+    private static final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger> IN_POOL =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    /** The stream closed: a configuration in flight stops at its next step, and logging is turned off again. */
+    private volatile boolean closed;
+    private final java.util.concurrent.atomic.AtomicBoolean undone = new java.util.concurrent.atomic.AtomicBoolean();
+    /** Agents ("region/agent") this stream sent setlogdp=true to and has not turned off since, answered or not. */
+    private final java.util.Set<String> touched = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     @Override
     public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
@@ -147,6 +156,13 @@ public class LogStreamerWsHandler extends SimpleChannelInboundHandler<WebSocketF
             ch.writeAndFlush(new TextWebSocketFrame("busy: the previous log configuration is still being applied; retry shortly"));
             return;
         }
+        java.util.concurrent.atomic.AtomicInteger mine = IN_POOL.computeIfAbsent(principal.key(), k -> new java.util.concurrent.atomic.AtomicInteger());
+        if (mine.incrementAndGet() > POOL_SHARE_PER_ADMIN) {
+            mine.decrementAndGet();
+            configuring.set(false);
+            ch.writeAndFlush(new TextWebSocketFrame("busy: your other log streams are still being configured; retry shortly"));
+            return;
+        }
         try {
             CONFIG_POOL.execute(() -> {
                 try {
@@ -155,17 +171,40 @@ public class LogStreamerWsHandler extends SimpleChannelInboundHandler<WebSocketF
                 } catch (Exception ex) {
                     logger.error("LogStreamerWsHandler: " + ex.getMessage());
                 } finally {
+                    mine.decrementAndGet();
                     configuring.set(false);
+                    if (closed) undoOnce();                 // closed meanwhile: undo what this configuration started
                 }
             });
         } catch (java.util.concurrent.RejectedExecutionException busy) {
+            mine.decrementAndGet();
             configuring.set(false);
             ch.writeAndFlush(new TextWebSocketFrame("busy: wsapi is applying other log configurations; retry shortly"));
+            if (closed) undoOnce();
+        }
+    }
+
+    /** Turn log streaming off on every agent this stream turned it on at, once (on the pool; never on an event loop). */
+    private void undoOnce() {
+        if (!undone.compareAndSet(false, true)) return;
+        dpEnabled = false;
+        if (touched.isEmpty()) return;
+        Runnable undo = () -> {
+            for (String t : new java.util.ArrayList<>(touched)) {
+                int slash = t.indexOf('/');
+                setAgentLogDP(t.substring(0, slash), t.substring(slash + 1), false);
+            }
+        };
+        try {
+            CONFIG_POOL.execute(undo);
+        } catch (java.util.concurrent.RejectedExecutionException full) {
+            java.util.concurrent.CompletableFuture.runAsync(undo);   // never leave an agent mirroring to nobody
         }
     }
 
     /** Point this session's log stream at an agent and set a level there (on {@link #CONFIG_POOL}); the reply line. */
     private String configure(String regionId, String agentId, String loglevel, String baseclass) {
+        if (closed) return "closed";
         // Enable dataplane log streaming for this session on the target agent before setting the
         // level. If the client retargets a different agent on the same socket, disable the old one.
         if (!dpEnabled || !agentId.equals(enabledAgent) || !regionId.equals(enabledRegion)) {
@@ -179,6 +218,7 @@ public class LogStreamerWsHandler extends SimpleChannelInboundHandler<WebSocketF
                 enabledAgent = agentId;
             }
         }
+        if (closed) return "closed";                         // the client left meanwhile: no level to set (undone in finally)
         MsgEvent req = plugin.getGlobalAgentMsgEvent(MsgEvent.Type.CONFIG, regionId, agentId);
         req.setParam("action", "setloglevel");
         req.setParam("baseclassname", baseclass);
@@ -200,13 +240,17 @@ public class LogStreamerWsHandler extends SimpleChannelInboundHandler<WebSocketF
      * Returns true on success (status_code 7).
      */
     private boolean setAgentLogDP(String regionId, String agentId, boolean isEnabled) {
+        String t = regionId + "/" + agentId;
+        if (isEnabled) touched.add(t);                       // before it is sent: the agent may act on it unanswered
         try {
             MsgEvent req = plugin.getGlobalAgentMsgEvent(MsgEvent.Type.CONFIG, regionId, agentId);
             req.setParam("action", "setlogdp");
             req.setParam("setlogdp", String.valueOf(isEnabled));
             req.setParam("session_id", logSessionId);
             MsgEvent resp = rpc(req);
-            return resp != null && resp.paramsContains("status_code") && "7".equals(resp.getParam("status_code"));
+            boolean ok = resp != null && resp.paramsContains("status_code") && "7".equals(resp.getParam("status_code"));
+            if (!isEnabled && ok) touched.remove(t);
+            return ok;
         } catch (Exception ex) {
             logger.error("LogStreamer.setAgentLogDP failed: " + ex.getMessage());
             return false;
@@ -215,28 +259,10 @@ public class LogStreamerWsHandler extends SimpleChannelInboundHandler<WebSocketF
 
     @Override
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
-        // Disable DP streaming for this session so the agent stops mirroring logs once nobody listens: a one-way
-        // message (nothing waits for the agent's answer), sent from the configuration pool, never this event loop.
-        if (dpEnabled && enabledRegion != null) {
-            final String region = enabledRegion, agent = enabledAgent;
-            dpEnabled = false;
-            try {
-                CONFIG_POOL.execute(() -> {
-                    try {
-                        MsgEvent req = plugin.getGlobalAgentMsgEvent(MsgEvent.Type.CONFIG, region, agent);
-                        req.setParam("action", "setlogdp");
-                        req.setParam("setlogdp", "false");
-                        req.setParam("session_id", logSessionId);
-                        gate.gateway.send(req, principal);
-                    } catch (Exception ex) {
-                        logger.warn("LogStreamer: could not turn off log streaming on " + region + "/" + agent + ": " + ex.getMessage());
-                    }
-                });
-            } catch (java.util.concurrent.RejectedExecutionException busy) {
-                logger.warn("LogStreamer: configuration pool full; log streaming on " + region + "/" + agent
-                        + " stays on for session " + logSessionId + " until that agent restarts");
-            }
-        }
+        // Turn log streaming off again wherever this stream turned it on, also when a configuration is still in flight
+        // (it stops at its next step and undoes in its finally) or was refused: never an agent mirroring to nobody.
+        closed = true;
+        if (!configuring.get()) undoOnce();
         if (listenerId != null) {
             try { plugin.getAgentService().getDataPlaneService().removeMessageListener(listenerId); } catch (Exception ignore) {}
         }

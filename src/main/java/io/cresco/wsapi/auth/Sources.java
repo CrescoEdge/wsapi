@@ -69,6 +69,31 @@ public final class Sources {
         }
     }
 
+    private static volatile int shareIpv4PrefixBits = 24;
+
+    /** The IPv4 prefix one fair share of a user's unknown-source budget covers (wsapi_auth_share_ipv4_prefix_bits, 16 to 32; 24). */
+    public static void shareIpv4PrefixBits(int bits) {
+        shareIpv4PrefixBits = Math.max(16, Math.min(32, bits));
+    }
+
+    /**
+     * The share source of a source: the unit that gets its own fair share of a user's unknown-source budget. An IPv4
+     * address's /24 (one network, as a guesser's addresses usually are), or the IPv6 bucket; any other string is its own.
+     */
+    public static String share(String source) {
+        String b = bucket(source);
+        String[] q = b.split("\\.");
+        if (q.length == 4 && b.matches("[0-9]{1,3}(\\.[0-9]{1,3}){3}")) {
+            int bits = shareIpv4PrefixBits;
+            long v = 0;
+            for (String part : q) v = (v << 8) | (Integer.parseInt(part) & 0xff);
+            long mask = bits == 0 ? 0 : (0xffffffffL << (32 - bits)) & 0xffffffffL;
+            long m = v & mask;
+            return ((m >> 24) & 0xff) + "." + ((m >> 16) & 0xff) + "." + ((m >> 8) & 0xff) + "." + (m & 0xff) + "/" + bits;
+        }
+        return b;
+    }
+
     /** The bucket of a source. */
     public static String bucket(String source) {
         if (source == null) return "";

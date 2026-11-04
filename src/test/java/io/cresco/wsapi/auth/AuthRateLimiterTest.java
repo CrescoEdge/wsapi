@@ -117,6 +117,67 @@ class AuthRateLimiterTest {
     }
 
     @Test
+    void eachUsersKnownGoodSetIsBoundedAndEvictsOnlyItsOwn() {
+        AuthRateLimiter l = limiter(3, 50, 1000);
+        l.success("198.51.100.10", "alice");
+        l.success("192.0.2.1", "bob");                               // bob's first place
+        for (int i = 0; i < 250; i++) l.success("203.0.113." + i, "bob");   // then 250 more places of bob's
+        for (int i = 0; i < 12; i++) l.failure("198.51.100.10", "mallory");  // a lock on alice's address
+        assertEquals(0, l.retryAfterMs("198.51.100.10", "alice"), "bob's logins never push alice's desk out of hers");
+        for (int i = 0; i < 12; i++) l.failure("192.0.2.1", "mallory");
+        assertTrue(l.retryAfterMs("192.0.2.1", "bob") > 0, "bob's first place fell out of his own bounded set ("
+                + AuthRateLimiter.KNOWN_PER_USER + " entries): only his own entries are evicted");
+    }
+
+    @Test
+    void underASustainedAttackFromManyNetworksANewUserIsDelayedNeverRefused() {
+        AuthRateLimiter l = limiter(1000, 50, 100_000);
+        long carolWaitedMax = 0;
+        int checksAgainstCarol = 0;
+        long carolNextTry = now.get();
+        boolean carolIn = false;
+        for (int t = 0; t < 600 && !carolIn; t++) {                 // ten minutes, one step per second
+            for (int n = 0; n < 300; n++) {                          // 300 /24s, each hammering every second
+                String a = "10." + (n / 256) + "." + (n % 256) + ".7";
+                if (l.retryAfterMs(a, "carol") == 0) {
+                    checksAgainstCarol++;
+                    l.failure(a, "carol");
+                }
+            }
+            if (now.get() >= carolNextTry) {                         // carol, from her hotel, retries when told
+                long w = l.retryAfterMs("192.0.2.77", "carol");
+                carolWaitedMax = Math.max(carolWaitedMax, w);
+                if (w == 0) {
+                    l.success("192.0.2.77", "carol");
+                    carolIn = true;
+                } else {
+                    carolNextTry = now.get() + w;
+                }
+            }
+            now.addAndGet(1000);
+        }
+        assertTrue(carolIn, "carol got in");
+        assertTrue(carolWaitedMax <= AuthRateLimiter.DEFAULT_DELAYED_CHECK_MS, "carol was told to wait at most "
+                + AuthRateLimiter.DEFAULT_DELAYED_CHECK_MS + " ms, not " + carolWaitedMax);
+        assertTrue(checksAgainstCarol <= 300 + 2 * 50 * 11, checksAgainstCarol + " guesses were checked");
+    }
+
+    @Test
+    void fairShareChecksPerWindowStayBelowTwiceTheBudget() {
+        AuthRateLimiter l = limiter(1000, 50, 100_000);
+        int checked = 0;
+        for (int n = 0; n < 5000; n++) {                             // every attempt from a new network, all within one window
+            String a = "10." + (n / 256 % 256) + "." + (n % 256) + ".1";
+            if (l.retryAfterMs(a, "dave") == 0) {
+                checked++;
+                l.failure(a, "dave");
+            }
+            now.addAndGet(5);
+        }
+        assertTrue(checked <= 100, checked + " checks in one window");
+    }
+
+    @Test
     void memoryIsBoundedAndAFullTableNeverRefusesANewcomer() {
         AuthRateLimiter l = limiter(3, 1000, 16);
         for (int i = 0; i < 100; i++) {
@@ -149,7 +210,7 @@ class AuthRateLimiterTest {
         Files.setPosixFilePermissions(dir.resolve(KnownGoodFile.KEY_FILE), PosixFilePermissions.fromString("rw-r--r--"));
         AuthRateLimiter exposed = limiter(3, 50, 1000);
         new KnownGoodFile(dir, warnings::add).load(exposed);
-        assertTrue(warnings.stream().anyMatch(w -> w.contains("not owner-only")), warnings.toString());
+        assertTrue(warnings.stream().anyMatch(w -> w.contains("not trusted") && w.contains("0600")), warnings.toString());
         for (int i = 0; i < 12; i++) exposed.failure("2001:db8:1:2::/64 2001:db8:1:2:aa:bb:cc:dd", "alice");
         assertTrue(exposed.retryAfterMs("2001:db8:1:2::/64 2001:db8:1:2:0:0:0:10", "alice") > 0, "an exposed store is not trusted");
     }

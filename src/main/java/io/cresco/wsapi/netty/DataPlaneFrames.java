@@ -125,6 +125,37 @@ final class DataPlaneFrames {
         return out;
     }
 
+    /** The key a plain map or terminal frame names its writer under (and {@code cresco_writer_roles}). */
+    static final String WRITER_KEY = "cresco_writer";
+
+    /**
+     * A plain map or terminal frame's JSON with its writer added ({@code cresco_writer}, {@code cresco_writer_roles}), so a
+     * client without envelope frames can still tell who wrote an event; existing clients ignore the extra keys. A user
+     * cannot forge them: a client's text frame that is a JSON object with that key is refused ({@link #claimsWriter}).
+     */
+    @SuppressWarnings("unchecked")
+    static String withWriter(String json, Message msg) throws JMSException {
+        Map<String, Object> e = envelope("map", msg);
+        if (e.get("writer") == null) return json;
+        Map<String, Object> m = GSON.fromJson(json, Map.class);
+        m.put(WRITER_KEY, e.get("writer"));
+        if (e.get("writer_roles") != null) m.put(WRITER_KEY + "_roles", e.get("writer_roles"));
+        return GSON.toJson(m);
+    }
+
+    /** A client's text that is a JSON object with a top-level {@code cresco_writer} (checked only when the text names it). */
+    static boolean claimsWriter(String text) {
+        if (text == null || !text.contains(WRITER_KEY)) return false;
+        String t = text.strip();
+        if (!t.startsWith("{")) return false;
+        try {
+            Object o = GSON.fromJson(t, Object.class);
+            return o instanceof Map && (((Map<?, ?>) o).containsKey(WRITER_KEY) || ((Map<?, ?>) o).containsKey(WRITER_KEY + "_roles"));
+        } catch (RuntimeException notJson) {
+            return false;
+        }
+    }
+
     /** The JSON text of a terminal frame's transfer properties. */
     static String transferEndJson(Message msg) throws JMSException {
         Map<String, String> out = new LinkedHashMap<>();

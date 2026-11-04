@@ -222,6 +222,9 @@ public final class Authenticator {
         if (tenant == null || tenant.isEmpty()) {
             return Result.fail(503, "wsapi is not ready: this agent's tenant is not known yet", "agent tenant unknown", null);
         }
+        if (authorization != null && authorization.regionMatches(true, 0, "Bearer ", 0, 7)) {
+            return token(authorization.substring(7).trim(), source, tenant);
+        }
         if (authorization != null) {
             String[] up = parseBasic(authorization);
             String user = up == null ? null : up[0];
@@ -239,6 +242,35 @@ public final class Authenticator {
         if (serviceKeyHeader != null) return serviceKey(serviceKeyHeader, source, tenant);
         limiter.failure(source, null);
         return Result.fail(401, "authentication required", "no credentials", null);
+    }
+
+    /**
+     * An API token ({@code Authorization: Bearer cwt1_<id>.<secret>}): checked on the network thread (one SHA-384, no
+     * PBKDF2), limited per source only, never per user: 256 bits cannot be guessed, so a tool that uses a token is never
+     * delayed by strangers guessing its user's password.
+     */
+    private Result token(String presented, String source, String tenant) {
+        long wait = limiter.retryAfterMs(source, null);
+        if (wait > 0) return limited(wait, null);
+        java.util.regex.Matcher m = CredentialStore.Token.FORM.matcher(presented);
+        if (!m.matches()) {
+            limiter.failure(source, null);
+            return Result.fail(401, "authentication failed", "malformed API token", null);
+        }
+        CredentialStore s = store.get();
+        CredentialStore.Token t = s.token(m.group(1));
+        if (t == null || !t.matches(presented)) {
+            limiter.failure(source, null);
+            return Result.fail(401, "authentication failed", t == null ? "unknown API token" : "wrong API token " + t.id,
+                    t == null ? null : t.user);
+        }
+        if (t.expired(clock.getAsLong())) {
+            limiter.failure(source, null);
+            return Result.fail(401, "authentication failed", "API token " + t.id + " has expired", t.user);
+        }
+        CredentialStore.Entry e = s.get(t.user);
+        if (e == null) return Result.fail(401, "authentication failed", "API token " + t.id + ": its user no longer exists", t.user);
+        return accept(e, source, tenant);
     }
 
     private Result serviceKey(String provided, String source, String tenant) {
@@ -299,6 +331,12 @@ public final class Authenticator {
             if (!good) {
                 limiter.failure(source, user);
                 return Result.fail(401, "authentication failed", e == null ? "unknown user" : "wrong password", user);
+            }
+            String weak = PasswordPolicy.weakness(user, secret);
+            if (weak != null) {
+                // the right password, but one the policy refuses (set before it, or written by hand): not usable until changed
+                return Result.fail(401, "authentication failed", "the password of " + user + " does not meet the password policy ("
+                        + weak + "); set a new one with CredentialTool passwd", user);
             }
             remember(s, user, up[1]);
             return accept(e, source, agentTenantName);
