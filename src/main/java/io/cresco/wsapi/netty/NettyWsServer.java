@@ -92,10 +92,17 @@ public class NettyWsServer {
         } else {
             logger.info("wsapi TLS provider: JDK");
         }
-        return SslContextBuilder.forServer(kmf)
+        SslContextBuilder b = SslContextBuilder.forServer(kmf)
                 .sslProvider(provider)
-                .protocols("TLSv1.3", "TLSv1.2")
-                .build();
+                .protocols("TLSv1.3", "TLSv1.2");
+        if (gate != null && gate.authenticator != null && gate.authenticator.production()) {
+            // security_profile=production: every connection presents a client certificate chaining to wsapi_client_ca
+            // (checked here, with its validity dates); who it is and whether it is revoked, the Authenticator decides
+            b.trustManager(gate.authenticator.clientCertificates().cas()).clientAuth(io.netty.handler.ssl.ClientAuth.REQUIRE);
+            logger.info("wsapi TLS requires a client certificate from " + gate.authenticator.clientCertificates().cas().length
+                    + " client CA(s) (security_profile=production)");
+        }
+        return b.build();
     }
 
     public void start() throws Exception {

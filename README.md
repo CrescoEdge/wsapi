@@ -42,9 +42,54 @@ To serve a CA-issued certificate, set `wsapi_keystore_file` to a PKCS12 file and
 is weaker than RSA-3072 / EC P-384 (EC P-256 under the `fips140-3` crypto policy), its signature algorithm is not
 allowed by the crypto policy, it is JKS, or it has expired.
 
+### The production profile: client certificates only
+
+`security_profile=production` (the setting the controller reads too; as `-Dsecurity_profile=production`, the environment
+variable `CRESCO_security_profile` or the agent's configuration) is for secure deployments, where every certificate is
+issued and assigned in advance. Any other value, or none, is the debug profile: everything below works as described.
+
+- **Mutual TLS on every endpoint** (API socket, dataplane, log stream): a client must present a certificate that chains
+  to a CA of `wsapi_client_ca` (a PEM bundle; intermediates included) and is within its validity dates, or TLS refuses
+  the connection before any HTTP is read.
+- **The certificate is the caller**, from its subject alternative names (URIs), set by the CA that issues it:
+  exactly one `cresco:api:<tenant>/<user>` (the caller `api:<tenant>/<user>`), exactly one `cresco:role:admin` or
+  `cresco:role:user`, and any number of `cresco:grant:<stream or prefix*>` (dataplane streams granted besides the user's
+  own `u:<user>:...`). A certificate without a caller or a role, or with two, is refused (403, the reason in the log).
+  Tenant rules, roles, connection and RPC limits apply as to any caller. For example, with OpenSSL:
+  `-addext "subjectAltName=URI:cresco:api:default/gaiakeep,URI:cresco:role:admin"`.
+- **Passwords and the service key are refused** (401, "disabled (security_profile=production)"), even over a valid
+  certificate. **API tokens are refused** too, unless `wsapi_allow_tokens=true`; then a token works over a client
+  certificate (TLS still requires one) and the caller is the token's user.
+- **Revocation**, re-read within a second of a change and applied to open connections as well (closed with 1008, like
+  a revoked token): a deny list, `wsapi_client_deny_file` (one SHA-256 certificate fingerprint per line, hex with or
+  without colons, `sha256:` optional, `#` comments), and a CRL file, `wsapi_client_crl` (PEM or DER, every CRL signed by
+  a CA of `wsapi_client_ca`). Neither may be writable by anyone but its owner. A list that cannot be read, does not
+  parse, (a CRL) does not verify, or becomes writable by others accepts no client certificate at all until it is fixed
+  (fail closed), and the open certificate connections close. A certificate that expires while connected is closed when it expires.
+  A CRL past its next update still applies, with an ERROR at start.
+- **wsapi does not start** in production (an ERROR `wsapi NOT started: security_profile=production: ...`) when
+  `wsapi_client_ca` is missing, unreadable or holds no certificate, when a configured deny list or CRL cannot be used,
+  or when the service key is configured and not disabled (`cresco_service_key` set without
+  `wsapi_service_key_enabled=false`). The users of the credential file cannot log in with a password; a WARNING at start
+  says so, and whether their tokens work.
+- Clients: pycrescolib `clientlib(host, port, client_cert="client.pem", client_key="client.key", fingerprint=...)` (or a
+  PKCS12 file as `client_cert`, `client_key_password=`; or `CRESCO_TLS_CLIENT_CERT`, `CRESCO_TLS_CLIENT_KEY`,
+  `CRESCO_TLS_CLIENT_KEY_PASSWORD`); clientlib `CrescoClient.builder(host, port).clientCertificate(cert, key, password)`
+  or `.clientCertificatePkcs12(p12, password)`, with the same environment variables. Both keep their server trust
+  (`fingerprint` / `CRESCO_TLS_FINGERPRINT`, or a CA file).
+
+| Config key | Default | Meaning |
+|---|---|---|
+| `security_profile` | (debug) | `production`: client certificates only |
+| `wsapi_client_ca` | | production: the client CA bundle (PEM); required |
+| `wsapi_client_deny_file` | | production: revoked client certificates by SHA-256 fingerprint |
+| `wsapi_client_crl` | | production: CRLs of the client CAs (PEM or DER) |
+| `wsapi_allow_tokens` | false | production: accept API tokens (over a client certificate) |
+
 ### Authentication
 
-Every upgrade request must authenticate, on every endpoint:
+Every upgrade request must authenticate, on every endpoint (in the debug profile; production accepts client
+certificates only, above):
 
 - **Per-user credentials**: `Authorization: Basic base64(user:password)`. Each user belongs to one tenant and holds one
   role, `admin` or `user`. A caller of another tenant than the agent's is refused (403), except an `admin` of a

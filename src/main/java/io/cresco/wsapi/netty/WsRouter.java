@@ -325,7 +325,7 @@ public class WsRouter extends SimpleChannelInboundHandler<FullHttpRequest> {
         }
 
         void accepted(String source, String path, Authenticator.Principal p) {
-            if (logger != null) logger.info("wsapi " + path + " from " + source + " authenticated as " + p + (p.serviceKey ? " (service key)" : ""));
+            if (logger != null) logger.info("wsapi " + path + " from " + source + " authenticated as " + p + " (" + p.credentialName() + ")");
         }
 
         void warn(String msg) {
@@ -377,10 +377,10 @@ public class WsRouter extends SimpleChannelInboundHandler<FullHttpRequest> {
         String authorization = req.headers().get(HttpHeaderNames.AUTHORIZATION);
         String serviceKey = req.headers().get(Authenticator.SERVICE_KEY_HEADER);
 
-        // everything that needs no PBKDF2 is decided here, on the network thread
+        // everything that needs no PBKDF2 is decided here, on the network thread (in production: the client certificate)
         Authenticator.Result fast;
         try {
-            fast = gate.authenticator.authenticateFast(authorization, serviceKey, source);
+            fast = gate.authenticator.authenticateFast(authorization, serviceKey, source, clientCertificate(ctx));
         } catch (RuntimeException e) {
             send(ctx, HttpResponseStatus.INTERNAL_SERVER_ERROR, "authentication error");
             return;
@@ -532,6 +532,18 @@ public class WsRouter extends SimpleChannelInboundHandler<FullHttpRequest> {
                             io.netty.handler.codec.http.websocketx.WebSocketCloseStatus.MESSAGE_TOO_BIG,
                             "message larger than " + cap + " bytes (" + key + ")"))
                     .addListener(ChannelFutureListener.CLOSE);
+        }
+    }
+
+    /** The client certificate the TLS layer verified (the production profile requires one), or null. */
+    static java.security.cert.X509Certificate clientCertificate(ChannelHandlerContext ctx) {
+        io.netty.handler.ssl.SslHandler ssl = ctx.pipeline().get(io.netty.handler.ssl.SslHandler.class);
+        if (ssl == null) return null;
+        try {
+            java.security.cert.Certificate[] chain = ssl.engine().getSession().getPeerCertificates();
+            return chain.length > 0 && chain[0] instanceof java.security.cert.X509Certificate ? (java.security.cert.X509Certificate) chain[0] : null;
+        } catch (javax.net.ssl.SSLPeerUnverifiedException none) {
+            return null;
         }
     }
 

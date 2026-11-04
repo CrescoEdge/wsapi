@@ -81,6 +81,7 @@ public final class Authenticator {
             switch (credential.kind) {
                 case TOKEN: return "API token " + credential.tokenId;
                 case SERVICE_KEY: return "service key";
+                case CERTIFICATE: return "client certificate sha256:" + credential.certFingerprint.substring(0, 16) + "...";
                 default: return "password";
             }
         }
@@ -132,16 +133,24 @@ public final class Authenticator {
      * its user as accepted), or the service key (an HMAC of the key under this process's random key, never the key).
      */
     static final class Credential {
-        enum Kind { PASSWORD, TOKEN, SERVICE_KEY }
+        enum Kind { PASSWORD, TOKEN, SERVICE_KEY, CERTIFICATE }
 
         final Kind kind;
         final String user, tokenId, tokenSha384, keyMac;
         final CredentialStore.Entry entry;
+        /** A client certificate (production) and its SHA-256 fingerprint. */
+        final java.security.cert.X509Certificate certificate;
+        final String certFingerprint;
         /** The last store this credential was found unchanged in (stores are immutable, replaced on every change). */
         volatile CredentialStore checkedIn;
 
         private Credential(Kind kind, String user, CredentialStore.Entry entry, String tokenId, String tokenSha384, String keyMac,
                            CredentialStore store) {
+            this(kind, user, entry, tokenId, tokenSha384, keyMac, store, null);
+        }
+
+        private Credential(Kind kind, String user, CredentialStore.Entry entry, String tokenId, String tokenSha384, String keyMac,
+                           CredentialStore store, java.security.cert.X509Certificate certificate) {
             this.kind = kind;
             this.user = user;
             this.entry = entry;
@@ -149,6 +158,12 @@ public final class Authenticator {
             this.tokenSha384 = tokenSha384;
             this.keyMac = keyMac;
             this.checkedIn = store;
+            this.certificate = certificate;
+            this.certFingerprint = certificate == null ? null : ClientCertificates.fingerprint(certificate);
+        }
+
+        static Credential certificate(String user, java.security.cert.X509Certificate c) {
+            return new Credential(Kind.CERTIFICATE, user, null, null, null, null, null, c);
         }
 
         static Credential password(CredentialStore s, CredentialStore.Entry e) {
@@ -273,10 +288,21 @@ public final class Authenticator {
      * service key, and a remembered password. Null when only a password check ({@link #authenticate}) can decide.
      */
     public Result authenticateFast(String authorization, String serviceKeyHeader, String source) {
+        return authenticateFast(authorization, serviceKeyHeader, source, null);
+    }
+
+    /**
+     * {@link #authenticateFast(String, String, String)}, with the client certificate the TLS layer verified (null: none).
+     * In the production profile the certificate is the credential (a password or the service key is refused, a token too
+     * unless allowed); in the debug profile it is not used.
+     */
+    public Result authenticateFast(String authorization, String serviceKeyHeader, String source, java.security.cert.X509Certificate clientCert) {
         String tenant = agentTenant.get();
         if (tenant == null || tenant.isEmpty()) {
             return Result.fail(503, "wsapi is not ready: this agent's tenant is not known yet", "agent tenant unknown", null);
         }
+        ClientCertificates certs = clientCertificates;
+        if (certs != null) return production(certs, authorization, serviceKeyHeader, source, clientCert, tenant);
         if (authorization != null && authorization.regionMatches(true, 0, "Bearer ", 0, 7)) {
             return token(authorization.substring(7).trim(), source, tenant);
         }
@@ -326,6 +352,56 @@ public final class Authenticator {
         return Result.fail(401, "authentication failed", why, t == null ? null : t.user);
     }
 
+    /** The production profile: a client certificate (or, when allowed, an API token over it); nothing else. */
+    private Result production(ClientCertificates certs, String authorization, String serviceKeyHeader, String source,
+                              java.security.cert.X509Certificate cert, String tenant) {
+        if (authorization != null && authorization.regionMatches(true, 0, "Bearer ", 0, 7)) {
+            if (allowTokens) return token(authorization.substring(7).trim(), source, tenant);
+            return Result.fail(401, "authentication failed: API tokens are disabled (security_profile=production)",
+                    "an API token, which production refuses (wsapi_allow_tokens is false)", null);
+        }
+        if (authorization != null) {
+            String[] up = parseBasic(authorization);
+            return Result.fail(401, "authentication failed: passwords are disabled (security_profile=production)",
+                    "a password, which production refuses", up == null ? null : up[0]);
+        }
+        if (serviceKeyHeader != null) {
+            return Result.fail(401, "authentication failed: the service key is disabled (security_profile=production)",
+                    "the service key, which production refuses", CredentialStore.SERVICE_KEY_USER);
+        }
+        if (cert == null) {
+            return Result.fail(401, "authentication failed: a client certificate is required (security_profile=production)",
+                    "no client certificate", null);
+        }
+        String fp = ClientCertificates.fingerprint(cert);
+        ClientCertificates.Mapping m;
+        try {
+            m = ClientCertificates.map(cert);
+        } catch (ClientCertificates.Invalid e) {
+            return Result.fail(403, "forbidden: the client certificate names no Cresco API caller",
+                    "client certificate sha256:" + fp + " refused: " + e.getMessage(), null);
+        }
+        String why = certs.revoked(cert);
+        if (why != null) {
+            return Result.fail(401, "authentication failed: the client certificate is not accepted", why, m.user);
+        }
+        Principal p = new Principal(m.tenant, m.user, m.role, false, m.grants, null, Credential.certificate(m.user, cert));
+        return admit(p, tenant, m.user);
+    }
+
+    /** The tenant decision: a caller of another tenant only as an admin of a superuser tenant. */
+    private Result admit(Principal p, String agentTenantName, String user) {
+        if (!p.tenant.equals(agentTenantName)) {
+            boolean superAdmin = p.isAdmin() && superuserTenants.get().contains(p.tenant);
+            if (!superAdmin) {
+                return Result.fail(403, "forbidden: a caller of tenant " + p.tenant + " cannot use the wsapi of an agent in tenant "
+                                + agentTenantName + " (only an admin of a superuser tenant can)",
+                        p + " is not of this agent's tenant " + agentTenantName, user);
+            }
+        }
+        return Result.ok(p);
+    }
+
     private Result serviceKey(String provided, String source, String tenant) {
         long wait = limiter.retryAfterMs(source, AuthRateLimiter.SERVICE_KEY);
         if (wait > 0) return limited(wait, CredentialStore.SERVICE_KEY_USER);
@@ -353,6 +429,27 @@ public final class Authenticator {
         this.serviceKeyLimitsPerSource = perSource;
         return this;
     }
+
+    private volatile ClientCertificates clientCertificates;
+    private volatile boolean allowTokens;
+
+    /**
+     * The production profile ({@code security_profile=production}): API clients authenticate with client certificates
+     * ({@link ClientCertificates}); passwords and the service key are refused, and API tokens too unless
+     * {@code allowTokens} ({@code wsapi_allow_tokens=true}). The TLS layer requires the certificate and checks its chain.
+     */
+    public Authenticator production(ClientCertificates certificates, boolean allowTokens) {
+        if (certificates == null) throw new IllegalArgumentException("production needs the client certificates");
+        this.allowTokens = allowTokens;
+        this.clientCertificates = certificates;
+        return this;
+    }
+
+    /** True in the production profile (client certificates only). */
+    public boolean production() { return clientCertificates != null; }
+
+    /** The client certificates of the production profile, or null. */
+    public ClientCertificates clientCertificates() { return clientCertificates; }
 
     /** A WARNING to log when wrong service keys arrive at a guessing rate ({@link AuthRateLimiter#serviceKeyAlarm}), else null. */
     public String serviceKeyAlarm() {
@@ -518,6 +615,9 @@ public final class Authenticator {
         String why;
         if (c.kind == Credential.Kind.SERVICE_KEY) {
             why = serviceKeyRevocation(c);
+        } else if (c.kind == Credential.Kind.CERTIFICATE) {
+            ClientCertificates certs = clientCertificates;
+            why = certs == null ? "client certificates are no longer accepted" : certs.revoked(c.certificate);
         } else {
             CredentialStore s = store.get();
             if (s == null) s = CredentialStore.empty();
@@ -526,6 +626,12 @@ public final class Authenticator {
             } else {
                 why = c.kind == Credential.Kind.TOKEN ? tokenRevocation(c, s) : passwordRevocation(c, s);
                 if (why == null) c.checkedIn = s;
+            }
+            if (why == null && c.kind == Credential.Kind.TOKEN && clientCertificates != null && !allowTokens) {
+                why = "API tokens are disabled (security_profile=production)";
+            }
+            if (why == null && c.kind == Credential.Kind.PASSWORD && clientCertificates != null) {
+                why = "passwords are disabled (security_profile=production)";
             }
             if (why == null && c.kind == Credential.Kind.TOKEN) {
                 CredentialStore.Token t = s.token(c.tokenId);

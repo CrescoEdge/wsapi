@@ -188,14 +188,47 @@ public class Plugin implements PluginService {
                         .serviceKeyLimitsPerSource(cfg.getBooleanParam("wsapi_service_key_limits_per_source", true));
                 int authThreads = cfg.getIntegerParam("wsapi_auth_threads",
                         Math.max(2, Math.min(8, Runtime.getRuntime().availableProcessors() / 2)));
-                String keyProblem = authenticator.serviceKeyProblem();
-                if (keyProblem == null) {
-                    logger.info("wsapi service key authentication is enabled");
-                } else if (keyProblem.contains("too weak")) {
-                    logger.error("wsapi: " + keyProblem + "; set a random key of at least 128 bits (e.g. openssl rand -hex 32), "
-                            + "or use per-user credentials from " + users.path());
+                boolean production = io.cresco.wsapi.auth.SecurityProfile.isProduction(
+                        cfg.getStringParam(io.cresco.wsapi.auth.SecurityProfile.SETTING));
+                if (production) {
+                    // security_profile=production: client certificates only; refuse to start without what that needs
+                    io.cresco.wsapi.auth.SecurityProfile.Production prod = io.cresco.wsapi.auth.SecurityProfile.check(
+                            cfg.getStringParam("wsapi_client_ca"), cfg.getStringParam("wsapi_client_deny_file"),
+                            cfg.getStringParam("wsapi_client_crl"), cfg.getStringParam("cresco_service_key"),
+                            cfg.getBooleanParam("wsapi_service_key_enabled", true), System::currentTimeMillis);
+                    if (!prod.problems.isEmpty()) {
+                        logger.error("wsapi NOT started: security_profile=production: " + String.join("; ", prod.problems));
+                        pluginBuilder.setIsActive(false);
+                        return false;
+                    }
+                    boolean allowTokens = cfg.getBooleanParam("wsapi_allow_tokens", false);
+                    authenticator.production(prod.certificates, allowTokens);
+                    logger.info("wsapi security_profile=production: API clients authenticate with a client certificate from "
+                            + cfg.getStringParam("wsapi_client_ca") + " (" + prod.certificates.cas().length + " CA(s)), mapped by its "
+                            + "subject alternative names cresco:api:<tenant>/<user> and cresco:role:<admin|user>; revocation from "
+                            + (cfg.getStringParam("wsapi_client_deny_file") == null ? "no deny list" : cfg.getStringParam("wsapi_client_deny_file"))
+                            + " and " + (cfg.getStringParam("wsapi_client_crl") == null ? "no CRL" : cfg.getStringParam("wsapi_client_crl"))
+                            + "; passwords and the service key are disabled; API tokens are "
+                            + (allowTokens ? "allowed over a client certificate (wsapi_allow_tokens is true)" : "disabled (wsapi_allow_tokens is false)"));
+                    io.cresco.wsapi.auth.CredentialStore st = users.current();
+                    if (st.size() > 0) {
+                        logger.warn("wsapi security_profile=production: the " + st.size() + " user(s) of " + users.path()
+                                + " cannot log in with a password" + (allowTokens ? "; their " + st.tokens().size() + " API token(s) work"
+                                : ", and their " + st.tokens().size() + " API token(s) are refused (wsapi_allow_tokens is false)"));
+                    }
+                    for (String stale : prod.certificates.staleCrls()) {
+                        logger.error("wsapi: the CRL of " + stale + " is past its next update; it still applies, publish a fresh one");
+                    }
                 } else {
-                    logger.info("wsapi: " + keyProblem + "; only per-user credentials from " + users.path() + " can log in");
+                    String keyProblem = authenticator.serviceKeyProblem();
+                    if (keyProblem == null) {
+                        logger.info("wsapi service key authentication is enabled");
+                    } else if (keyProblem.contains("too weak")) {
+                        logger.error("wsapi: " + keyProblem + "; set a random key of at least 128 bits (e.g. openssl rand -hex 32), "
+                                + "or use per-user credentials from " + users.path());
+                    } else {
+                        logger.info("wsapi: " + keyProblem + "; only per-user credentials from " + users.path() + " can log in");
+                    }
                 }
                 List<String> origins = new ArrayList<>();
                 String originCsv = cfg.getStringParam("wsapi_allowed_origins");
