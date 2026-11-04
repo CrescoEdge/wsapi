@@ -67,6 +67,7 @@ the command line):
 java -cp wsapi.jar io.cresco.wsapi.auth.CredentialTool add    <ws.users> <user> <tenant> <admin|user>
 java -cp wsapi.jar io.cresco.wsapi.auth.CredentialTool passwd <ws.users> <user>
 java -cp wsapi.jar io.cresco.wsapi.auth.CredentialTool remove <ws.users> <user>
+java -cp wsapi.jar io.cresco.wsapi.auth.CredentialTool role   <ws.users> <user> <admin|user>
 java -cp wsapi.jar io.cresco.wsapi.auth.CredentialTool grant  <ws.users> <user> <stream|prefix*>
 java -cp wsapi.jar io.cresco.wsapi.auth.CredentialTool revoke <ws.users> <user> <stream|prefix*>
 java -cp wsapi.jar io.cresco.wsapi.auth.CredentialTool list   <ws.users>
@@ -152,8 +153,8 @@ within about 2 s of a change to the credential file (wsapi re-reads it within a 
 - `remove` closes every connection of that user, its tokens' included;
 - `passwd` closes the user's password connections (its tokens are separate credentials and keep theirs; revoke them too
   if the password leaked);
-- a changed role, tenant or stream grants (`grant`, `revoke`, or an edit) closes every connection of that user, password
-  and token alike, so the client reconnects with its new rights;
+- a changed role, tenant or stream grants (`role`, `grant`, `revoke`, or an edit) closes every connection of that user,
+  password and token alike, so the client reconnects with its new rights;
 - a changed or disabled service key closes the service key's connections, and a caller of another tenant whose tenant is
   no longer in `broker_superuser_tenants` loses its connections too.
 

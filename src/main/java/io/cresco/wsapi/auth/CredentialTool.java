@@ -21,6 +21,7 @@ import java.util.Arrays;
  *   java -cp wsapi.jar io.cresco.wsapi.auth.CredentialTool add    &lt;file&gt; &lt;user&gt; &lt;tenant&gt; &lt;admin|user&gt;
  *   java -cp wsapi.jar io.cresco.wsapi.auth.CredentialTool passwd &lt;file&gt; &lt;user&gt;
  *   java -cp wsapi.jar io.cresco.wsapi.auth.CredentialTool remove &lt;file&gt; &lt;user&gt;
+ *   java -cp wsapi.jar io.cresco.wsapi.auth.CredentialTool role   &lt;file&gt; &lt;user&gt; &lt;admin|user&gt;
  *   java -cp wsapi.jar io.cresco.wsapi.auth.CredentialTool grant  &lt;file&gt; &lt;user&gt; &lt;stream|prefix*&gt;
  *   java -cp wsapi.jar io.cresco.wsapi.auth.CredentialTool revoke &lt;file&gt; &lt;user&gt; &lt;stream|prefix*&gt;
  *   java -cp wsapi.jar io.cresco.wsapi.auth.CredentialTool list   &lt;file&gt;
@@ -32,7 +33,8 @@ import java.util.Arrays;
  * SHA-384 is kept.
  * The password is read from the terminal without echo (twice), or, with no terminal, as the first line of standard
  * input. It is never taken from the command line (where {@code ps} would show it). The file is written atomically with
- * mode 0600. wsapi re-reads it within seconds of a change.
+ * mode 0600. wsapi re-reads it within seconds of a change, and closes the open connections a change revokes (a removed
+ * user, a changed password, role or grants, a revoked token).
  */
 public final class CredentialTool {
 
@@ -92,6 +94,17 @@ public final class CredentialTool {
                     if (store.get(args[2]) == null) throw new IllegalArgumentException("no user " + args[2]);
                     save(file, store.without(args[2]));
                     out.println("removed " + args[2] + " from " + file);
+                    return 0;
+                }
+                case "role": {
+                    need(args, 4);
+                    Path file = Paths.get(args[1]);
+                    CredentialStore store = load(file);
+                    CredentialStore.Entry e = store.get(args[2]);
+                    if (e == null) throw new IllegalArgumentException("no user " + args[2]);
+                    CredentialStore.validate(e.user, e.tenant, args[3], "user");
+                    save(file, store.with(new CredentialStore.Entry(e.user, e.tenant, args[3], e.hash, e.grants)));
+                    out.println("set the role of " + args[2] + " to " + args[3] + " in " + file);
                     return 0;
                 }
                 case "grant":
@@ -256,7 +269,8 @@ public final class CredentialTool {
         out.println("Manage wsapi per-user credentials (PBKDF2-HMAC-SHA-384, file mode 0600).");
         out.println("  add    <file> <user> <tenant> <admin|user>   add a user (asks for the password)");
         out.println("  passwd <file> <user>                         set a new password");
-        out.println("  remove <file> <user>                         remove a user");
+        out.println("  remove <file> <user>                         remove a user (and its API tokens)");
+        out.println("  role   <file> <user> <admin|user>            change a user's role");
         out.println("  grant  <file> <user> <stream|prefix*>         let a user use a dataplane stream besides their own u:<user>:*");
         out.println("  revoke <file> <user> <stream|prefix*>         take that back");
         out.println("  list   <file>                                list users and API tokens (never passwords or tokens)");
@@ -267,5 +281,7 @@ public final class CredentialTool {
                 + " bits (e.g. four random words), and may not be a well-known password.");
         out.println("The default file is <agent data>/plugin-data/<wsapi plugin id>/ws.users (wsapi_users_file overrides it).");
         out.println("Without a terminal the password is the first line of standard input.");
+        out.println("A running wsapi applies a change within about 2 s, also to open connections: removing a user, changing its");
+        out.println("password, role or grants, or revoking a token closes the connections that change revokes.");
     }
 }
