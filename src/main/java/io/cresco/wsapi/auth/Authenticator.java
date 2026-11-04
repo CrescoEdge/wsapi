@@ -44,23 +44,34 @@ public final class Authenticator {
         public final boolean serviceKey;
         /** Dataplane streams granted besides the user's own (exact names, or prefixes ending in *). */
         public final List<String> grants;
+        /**
+         * What the per-caller limits (connections, RPCs in flight) count this caller under besides tenant and user: the
+         * service key's source bucket, so every tool on every host that shares the key does not share one budget; null
+         * for a per-user credential.
+         */
+        public final String scope;
 
         Principal(String tenant, String user, String role, boolean serviceKey) {
-            this(tenant, user, role, serviceKey, List.of());
+            this(tenant, user, role, serviceKey, List.of(), null);
         }
 
         Principal(String tenant, String user, String role, boolean serviceKey, List<String> grants) {
+            this(tenant, user, role, serviceKey, grants, null);
+        }
+
+        Principal(String tenant, String user, String role, boolean serviceKey, List<String> grants, String scope) {
             this.tenant = tenant;
             this.user = user;
             this.role = role;
             this.serviceKey = serviceKey;
             this.grants = grants == null ? List.of() : List.copyOf(grants);
+            this.scope = scope;
         }
 
         public boolean isAdmin() { return CredentialStore.ROLE_ADMIN.equals(role); }
 
-        /** {@code tenant/user}: one key per caller (limits, connection counts). */
-        public String key() { return tenant + "/" + user; }
+        /** {@code tenant/user}, or {@code tenant/user@scope}: one key per caller (limits, connection counts). */
+        public String key() { return tenant + "/" + user + (scope == null ? "" : "@" + scope); }
 
         /** {@code api:<tenant>/<user>}, as the controller's caller stamp names it. */
         public String caller() { return "api:" + tenant + "/" + user; }
@@ -243,7 +254,24 @@ public final class Authenticator {
             return Result.fail(401, "authentication failed", "wrong service key", CredentialStore.SERVICE_KEY_USER);
         }
         limiter.success(source, AuthRateLimiter.SERVICE_KEY);
-        return Result.ok(new Principal(tenant, CredentialStore.SERVICE_KEY_USER, CredentialStore.ROLE_ADMIN, true));
+        return Result.ok(new Principal(tenant, CredentialStore.SERVICE_KEY_USER, CredentialStore.ROLE_ADMIN, true, List.of(),
+                serviceKeyLimitsPerSource ? AuthRateLimiter.bucket(source) : null));
+    }
+
+    private volatile boolean serviceKeyLimitsPerSource = true;
+
+    /**
+     * Count the service key's connections and RPCs in flight per source host ({@code wsapi_service_key_limits_per_source},
+     * on by default): every client of the key used to share one budget, so one busy tool could starve the others.
+     */
+    public Authenticator serviceKeyLimitsPerSource(boolean perSource) {
+        this.serviceKeyLimitsPerSource = perSource;
+        return this;
+    }
+
+    /** A WARNING to log when wrong service keys arrive at a guessing rate ({@link AuthRateLimiter#serviceKeyAlarm}), else null. */
+    public String serviceKeyAlarm() {
+        return limiter.serviceKeyAlarm();
     }
 
     private Result basicSlow(String[] up, String source, String agentTenantName) {

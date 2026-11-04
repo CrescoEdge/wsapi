@@ -53,8 +53,31 @@ public class LogStreamerWsHandler extends SimpleChannelInboundHandler<WebSocketF
 
     /** The configuration RPCs this stream sends go out for its authenticated client, never as wsapi itself. */
     private MsgEvent rpc(MsgEvent req) {
-        return gate.gateway.rpc(req, 0, principal);
+        return gate.gateway.rpc(req, CONFIG_RPC_TIMEOUT_MS, principal);
     }
+
+    /** How long one setlogdp / setloglevel RPC may wait for the named agent. */
+    static final long CONFIG_RPC_TIMEOUT_MS = 10_000L;
+
+    /**
+     * Log-stream configuration runs here, never on a Netty event loop: its RPCs wait for the named agent (up to
+     * {@link #CONFIG_RPC_TIMEOUT_MS}), and a line naming an agent that does not answer used to hold the connection's
+     * event loop, and every other client on it, for the library's 30 s RPC timeout. Bounded: 8 threads, 64 queued;
+     * beyond that a client is told to retry.
+     */
+    static final java.util.concurrent.ThreadPoolExecutor CONFIG_POOL = new java.util.concurrent.ThreadPoolExecutor(8, 8,
+            60L, java.util.concurrent.TimeUnit.SECONDS, new java.util.concurrent.ArrayBlockingQueue<>(64), r -> {
+                Thread t = new Thread(r, "wsapi-logstream-config");
+                t.setDaemon(true);
+                return t;
+            }, new java.util.concurrent.ThreadPoolExecutor.AbortPolicy());
+
+    static {
+        CONFIG_POOL.allowCoreThreadTimeOut(true);
+    }
+
+    /** One configuration at a time per log stream. */
+    private final java.util.concurrent.atomic.AtomicBoolean configuring = new java.util.concurrent.atomic.AtomicBoolean();
 
     @Override
     public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
@@ -119,39 +142,56 @@ public class LogStreamerWsHandler extends SimpleChannelInboundHandler<WebSocketF
         String message = ((TextWebSocketFrame) frame).text();
         String[] sst = message.split(",");
         if (sst.length != 4) return;
-        try {
-            String regionId = sst[0], agentId = sst[1], loglevel = sst[2], baseclass = sst[3];
-            // Enable dataplane log streaming for this session on the target agent before setting the
-            // level. If the client retargets a different agent on the same socket, disable the old one.
-            if (!dpEnabled || !agentId.equals(enabledAgent) || !regionId.equals(enabledRegion)) {
-                if (dpEnabled && enabledAgent != null) {
-                    setAgentLogDP(enabledRegion, enabledAgent, false);
-                    dpEnabled = false;
-                }
-                if (setAgentLogDP(regionId, agentId, true)) {
-                    dpEnabled = true;
-                    enabledRegion = regionId;
-                    enabledAgent = agentId;
-                }
-            }
-            MsgEvent req = plugin.getGlobalAgentMsgEvent(MsgEvent.Type.CONFIG, regionId, agentId);
-            req.setParam("action", "setloglevel");
-            req.setParam("baseclassname", baseclass);
-            req.setParam("loglevel", loglevel);
-            req.setParam("session_id", logSessionId);
-            MsgEvent resp = rpc(req);
-            String respMessage = "Error setting loglevel";
-            if (resp != null && resp.paramsContains("status_code")) {
-                if ("7".equals(resp.getParam("status_code"))) {
-                    respMessage = "set loglevel: " + loglevel + " for baseclass: " + baseclass + " on region_id:" + regionId + " agent_id:" + agentId;
-                } else {
-                    respMessage = "could not set loglevel status_code: " + resp.getParam("status_code") + " status_desc: " + resp.getParam("status_desc");
-                }
-            }
-            ctx.writeAndFlush(new TextWebSocketFrame(respMessage));
-        } catch (Exception ex) {
-            logger.error("LogStreamerWsHandler: " + ex.getMessage());
+        Channel ch = ctx.channel();
+        if (!configuring.compareAndSet(false, true)) {
+            ch.writeAndFlush(new TextWebSocketFrame("busy: the previous log configuration is still being applied; retry shortly"));
+            return;
         }
+        try {
+            CONFIG_POOL.execute(() -> {
+                try {
+                    String reply = configure(sst[0], sst[1], sst[2], sst[3]);
+                    if (ch.isActive()) ch.writeAndFlush(new TextWebSocketFrame(reply));
+                } catch (Exception ex) {
+                    logger.error("LogStreamerWsHandler: " + ex.getMessage());
+                } finally {
+                    configuring.set(false);
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException busy) {
+            configuring.set(false);
+            ch.writeAndFlush(new TextWebSocketFrame("busy: wsapi is applying other log configurations; retry shortly"));
+        }
+    }
+
+    /** Point this session's log stream at an agent and set a level there (on {@link #CONFIG_POOL}); the reply line. */
+    private String configure(String regionId, String agentId, String loglevel, String baseclass) {
+        // Enable dataplane log streaming for this session on the target agent before setting the
+        // level. If the client retargets a different agent on the same socket, disable the old one.
+        if (!dpEnabled || !agentId.equals(enabledAgent) || !regionId.equals(enabledRegion)) {
+            if (dpEnabled && enabledAgent != null) {
+                setAgentLogDP(enabledRegion, enabledAgent, false);
+                dpEnabled = false;
+            }
+            if (setAgentLogDP(regionId, agentId, true)) {
+                dpEnabled = true;
+                enabledRegion = regionId;
+                enabledAgent = agentId;
+            }
+        }
+        MsgEvent req = plugin.getGlobalAgentMsgEvent(MsgEvent.Type.CONFIG, regionId, agentId);
+        req.setParam("action", "setloglevel");
+        req.setParam("baseclassname", baseclass);
+        req.setParam("loglevel", loglevel);
+        req.setParam("session_id", logSessionId);
+        MsgEvent resp = rpc(req);
+        if (resp != null && resp.paramsContains("status_code")) {
+            if ("7".equals(resp.getParam("status_code"))) {
+                return "set loglevel: " + loglevel + " for baseclass: " + baseclass + " on region_id:" + regionId + " agent_id:" + agentId;
+            }
+            return "could not set loglevel status_code: " + resp.getParam("status_code") + " status_desc: " + resp.getParam("status_desc");
+        }
+        return "Error setting loglevel";
     }
 
     /**
@@ -175,10 +215,27 @@ public class LogStreamerWsHandler extends SimpleChannelInboundHandler<WebSocketF
 
     @Override
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
-        // Disable DP streaming for this session so the agent stops mirroring logs once nobody listens.
+        // Disable DP streaming for this session so the agent stops mirroring logs once nobody listens: a one-way
+        // message (nothing waits for the agent's answer), sent from the configuration pool, never this event loop.
         if (dpEnabled && enabledRegion != null) {
-            try { setAgentLogDP(enabledRegion, enabledAgent, false); } catch (Exception ignore) {}
+            final String region = enabledRegion, agent = enabledAgent;
             dpEnabled = false;
+            try {
+                CONFIG_POOL.execute(() -> {
+                    try {
+                        MsgEvent req = plugin.getGlobalAgentMsgEvent(MsgEvent.Type.CONFIG, region, agent);
+                        req.setParam("action", "setlogdp");
+                        req.setParam("setlogdp", "false");
+                        req.setParam("session_id", logSessionId);
+                        gate.gateway.send(req, principal);
+                    } catch (Exception ex) {
+                        logger.warn("LogStreamer: could not turn off log streaming on " + region + "/" + agent + ": " + ex.getMessage());
+                    }
+                });
+            } catch (java.util.concurrent.RejectedExecutionException busy) {
+                logger.warn("LogStreamer: configuration pool full; log streaming on " + region + "/" + agent
+                        + " stays on for session " + logSessionId + " until that agent restarts");
+            }
         }
         if (listenerId != null) {
             try { plugin.getAgentService().getDataPlaneService().removeMessageListener(listenerId); } catch (Exception ignore) {}

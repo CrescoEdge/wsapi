@@ -8,6 +8,7 @@ import io.cresco.library.utilities.CLogger;
 
 
 import io.cresco.wsapi.auth.AuthRateLimiter;
+import io.cresco.wsapi.auth.KnownGoodFile;
 import io.cresco.wsapi.auth.Authenticator;
 import io.cresco.wsapi.auth.CredentialFile;
 import io.cresco.wsapi.netty.ApiGateway;
@@ -58,6 +59,10 @@ public class Plugin implements PluginService {
     private static final Logger slog = LoggerFactory.getLogger(Plugin.class);
     private ConfigurationAdmin configurationAdmin;
     private Map<String,Object> map;
+
+    private volatile KnownGoodFile knownGood;
+    private volatile AuthRateLimiter limiter;
+    private volatile java.util.concurrent.ScheduledExecutorService knownGoodSaver;
 
     // Assigned when the embedded Netty WebSocket server starts, so isStopped() can shut it down.
     private volatile NettyWsServer nettyServer;
@@ -154,12 +159,31 @@ public class Plugin implements PluginService {
                         1000L * cfg.getIntegerParam("wsapi_auth_window_seconds", 60),
                         1000L * cfg.getIntegerParam("wsapi_auth_lockout_seconds", 60),
                         1000L * cfg.getIntegerParam("wsapi_auth_max_lockout_seconds", 900),
-                        10_000, System::currentTimeMillis);
+                        100_000, System::currentTimeMillis);
+                limiter.knownGoodTtlMs(24L * 3600_000L * Math.max(1, cfg.getIntegerParam("wsapi_auth_known_good_days", 30)));
+                io.cresco.wsapi.auth.Sources.ipv6PrefixBits(cfg.getIntegerParam("wsapi_auth_ipv6_prefix_bits", 64));
+                // the sources each user logged in from, kept across restarts (keyed hashes, owner-only files)
+                this.knownGood = new KnownGoodFile(dataDir, m -> logger.warn(m));
+                knownGood.load(limiter);
+                this.limiter = limiter;
+                this.knownGoodSaver = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+                    Thread t = new Thread(r, "wsapi-known-good");
+                    t.setDaemon(true);
+                    return t;
+                });
+                knownGoodSaver.scheduleWithFixedDelay(() -> {
+                    try {
+                        knownGood.saveIfChanged(limiter);
+                    } catch (RuntimeException e) {
+                        logger.warn("wsapi: saving the known-good sources failed: " + e.getMessage());
+                    }
+                }, 15, 15, java.util.concurrent.TimeUnit.SECONDS);
                 Authenticator authenticator = new Authenticator(users::current,
                         () -> cfg.getStringParam("cresco_service_key"),
                         () -> cfg.getBooleanParam("wsapi_service_key_enabled", true),
                         this::agentTenant, this::superuserTenants, limiter,
-                        1000L * cfg.getIntegerParam("wsapi_auth_cache_seconds", 300), System::currentTimeMillis);
+                        1000L * cfg.getIntegerParam("wsapi_auth_cache_seconds", 300), System::currentTimeMillis)
+                        .serviceKeyLimitsPerSource(cfg.getBooleanParam("wsapi_service_key_limits_per_source", true));
                 int authThreads = cfg.getIntegerParam("wsapi_auth_threads",
                         Math.max(2, Math.min(8, Runtime.getRuntime().availableProcessors() / 2)));
                 String keyProblem = authenticator.serviceKeyProblem();
@@ -288,6 +312,11 @@ public class Plugin implements PluginService {
             }
         }
         this.nettyServer = null;
+        if (knownGoodSaver != null) {
+            knownGoodSaver.shutdownNow();
+            knownGoodSaver = null;
+        }
+        if (knownGood != null && limiter != null) knownGood.saveIfChanged(limiter);
 
         if (pluginBuilder != null) {
             pluginBuilder.setExecutor(null);

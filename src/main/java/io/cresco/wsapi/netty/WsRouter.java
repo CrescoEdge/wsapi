@@ -3,6 +3,7 @@ package io.cresco.wsapi.netty;
 import io.cresco.library.plugin.PluginBuilder;
 import io.cresco.library.utilities.CLogger;
 import io.cresco.wsapi.auth.Authenticator;
+import io.cresco.wsapi.auth.CredentialStore;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
@@ -189,6 +190,10 @@ public class WsRouter extends SimpleChannelInboundHandler<FullHttpRequest> {
             }
             logger.warn("wsapi refused " + path + " from " + source + " as " + (r.attemptedUser == null ? "-" : r.attemptedUser)
                     + ": " + r.logReason + " (HTTP " + r.status + ")");
+            if (CredentialStore.SERVICE_KEY_USER.equals(r.attemptedUser) && authenticator != null) {
+                String alarm = authenticator.serviceKeyAlarm();
+                if (alarm != null) logger.error("wsapi ALARM: " + alarm);
+            }
         }
 
         void accepted(String source, String path, Authenticator.Principal p) {
@@ -250,7 +255,7 @@ public class WsRouter extends SimpleChannelInboundHandler<FullHttpRequest> {
             return;
         }
         // a password check: bounded per source, then the bounded pool
-        if (!gate.reservePending(source)) {
+        if (!gate.reservePending(io.cresco.wsapi.auth.Sources.bucket(source))) {
             gate.warn("wsapi refused " + path + " from " + source + ": too many password checks pending from this source");
             send(ctx, HttpResponseStatus.TOO_MANY_REQUESTS, "too many logins in progress from this address; retry shortly");
             return;
@@ -265,7 +270,7 @@ public class WsRouter extends SimpleChannelInboundHandler<FullHttpRequest> {
                 } catch (RuntimeException e) {
                     r = null;
                 } finally {
-                    gate.releasePending(source);
+                    gate.releasePending(io.cresco.wsapi.auth.Sources.bucket(source));
                 }
                 final Authenticator.Result result = r;
                 try {
@@ -278,7 +283,7 @@ public class WsRouter extends SimpleChannelInboundHandler<FullHttpRequest> {
                 }
             });
         } catch (RejectedExecutionException busy) {
-            gate.releasePending(source);
+            gate.releasePending(io.cresco.wsapi.auth.Sources.bucket(source));
             req.release();
             ctx.channel().config().setAutoRead(true);
             send(ctx, HttpResponseStatus.SERVICE_UNAVAILABLE, "wsapi is busy authenticating; retry shortly");
@@ -382,30 +387,13 @@ public class WsRouter extends SimpleChannelInboundHandler<FullHttpRequest> {
         }
     }
 
-    /**
-     * The source an attempt is counted against: an IPv4 address (an IPv4-mapped IPv6 address counts as its IPv4
-     * address), or an IPv6 /64 ({@code 2001:db8:aa:bb::/64}), since one IPv6 host is normally given a whole /64.
-     */
+    /** The source an upgrade is counted against: {@code "<bucket> <address>"} ({@link io.cresco.wsapi.auth.Sources}). */
     static String sourceOf(SocketAddress a) {
         if (a instanceof InetSocketAddress) {
             InetSocketAddress i = (InetSocketAddress) a;
             java.net.InetAddress addr = i.getAddress();
             if (addr == null) return i.getHostString();
-            if (addr instanceof java.net.Inet6Address) {
-                byte[] b = addr.getAddress();
-                boolean mapped = true;
-                for (int k = 0; k < 10; k++) if (b[k] != 0) mapped = false;
-                if (mapped && (b[10] & 0xff) == 0xff && (b[11] & 0xff) == 0xff) {
-                    return (b[12] & 0xff) + "." + (b[13] & 0xff) + "." + (b[14] & 0xff) + "." + (b[15] & 0xff);
-                }
-                StringBuilder sb = new StringBuilder();
-                for (int k = 0; k < 8; k += 2) {
-                    if (k > 0) sb.append(':');
-                    sb.append(Integer.toHexString(((b[k] & 0xff) << 8) | (b[k + 1] & 0xff)));
-                }
-                return sb.append("::/64").toString();
-            }
-            return addr.getHostAddress();
+            return io.cresco.wsapi.auth.Sources.of(addr);
         }
         return String.valueOf(a);
     }

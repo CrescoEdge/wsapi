@@ -51,6 +51,8 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
     private final CLogger logger;
 
     private volatile boolean active = false;
+    /** The client asked for envelope frames (each with its verified writer, see {@link DataPlaneFrames}). */
+    private volatile boolean envelope = false;
     private volatile String listenerId;
     private volatile StreamInfo streamInfo;
     private volatile int shard = 0;
@@ -116,24 +118,21 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
                     // counted 1 where it carries 2-4 bytes, so wsapi.dataplane.bytes under-reported text traffic)
                     DATAPLANE_BYTES.addAndGet(utf8Bytes((TextWebSocketFrame) frame));
                     DATAPLANE_MESSAGES.incrementAndGet();
+                    if (streamInfo.getIdentKey() == null) return;      // a selector session only receives
                     TextMessage tm = plugin.getAgentService().getDataPlaneService().createTextMessage();
                     tm.setText(message);
-                    tm.setStringProperty(streamInfo.getIdentKey(), streamInfo.getIdentId());
-                    tm.setStringProperty(streamInfo.getIoTypeKey(), streamInfo.getInputId());
-                    stampWriter(tm);
+                    route(tm);
                     plugin.getAgentService().getDataPlaneService().sendMessage(
                             TopicType.GLOBAL, tm, jakarta.jms.DeliveryMode.NON_PERSISTENT, 0, 0, shard);
                 }
             } else if (frame instanceof BinaryWebSocketFrame) {
-                if (!active) return; // ignore data before handshake
+                if (!active || streamInfo.getIdentKey() == null) return; // no data before the handshake; selector sessions only receive
                 ByteBuf buf = frame.content();
                 byte[] b = new byte[buf.readableBytes()];
                 buf.getBytes(buf.readerIndex(), b);
                 BytesMessage bm = plugin.getAgentService().getDataPlaneService().createBytesMessage();
                 bm.writeBytes(b);
-                bm.setStringProperty(streamInfo.getIdentKey(), streamInfo.getIdentId());
-                bm.setStringProperty(streamInfo.getIoTypeKey(), streamInfo.getInputId());
-                stampWriter(bm);
+                route(bm);
                 bm.setIntProperty("dp_bytes", b.length); // readable payload size for link throughput metrics
                 DATAPLANE_BYTES.addAndGet(b.length);
                 DATAPLANE_MESSAGES.incrementAndGet();
@@ -148,6 +147,19 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
     /** The verified writer of everything this client publishes: {@code cresco_writer} and {@code cresco_writer_roles}. */
     static final String WRITER = "cresco_writer";
     static final String WRITER_ROLES = "cresco_writer_roles";
+
+    /**
+     * The routing properties of what this client publishes, then its writer. The io type first and the stream's own
+     * ident last, so whatever the handshake said, a message carries the stream it was checked for (the handshake
+     * already refuses an io_type_key naming the ident's property).
+     */
+    private void route(jakarta.jms.Message m) throws jakarta.jms.JMSException {
+        if (streamInfo.getIoTypeKey() != null && streamInfo.getInputId() != null) {
+            m.setStringProperty(streamInfo.getIoTypeKey(), streamInfo.getInputId());
+        }
+        m.setStringProperty(streamInfo.getIdentKey(), streamInfo.getIdentId());
+        stampWriter(m);
+    }
 
     private void stampWriter(jakarta.jms.Message m) throws jakarta.jms.JMSException {
         if (principal == null) return;
@@ -217,8 +229,24 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
         if (!owns(p, si.getIdentId())) {
             return p + " may use only its own streams (" + ownPrefix(p) + "...) or streams granted to it, not " + si.getIdentId();
         }
+        if (si.getIoTypeKey() != null && !"type".equals(si.getIoTypeKey())) {
+            // every property a user's message carries routes it: only its own stream_name and a type
+            return p + " may set only type (io_type_key=type) beside its stream_name, not " + si.getIoTypeKey();
+        }
         if ("type".equals(si.getIoTypeKey()) && "output".equals(si.getInputId()) && !si.getIdentId().startsWith(ownPrefix(p))) {
             return p + " may write type=output only on its own streams";
+        }
+        return null;
+    }
+
+    /**
+     * A handshake whose io_type_key names its ident's own property (for everyone): the second value would replace the
+     * stream the handshake was checked for (ident_id u:bob:mine, io_type_key stream_name, input_id u:alice:private wrote
+     * into alice's stream).
+     */
+    static String routingRefusal(StreamInfo si) {
+        if (si.getIdentKey() != null && si.getIoTypeKey() != null && si.getIoTypeKey().equalsIgnoreCase(si.getIdentKey())) {
+            return "io_type_key may not name the ident_key's property (" + si.getIdentKey() + ")";
         }
         return null;
     }
@@ -247,19 +275,25 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
         StreamInfo si;
         Map<String, String> mapMessage = null;
         try { mapMessage = gson.fromJson(message, MAP_TYPE); } catch (Exception ignore) {}
+        boolean wantsEnvelope = false;
         if (mapMessage != null && mapMessage.get("ident_key") != null) {
             si = new StreamInfo("netty", mapMessage.get("ident_key"), mapMessage.get("ident_id"));
             si.setIoTypeKey(mapMessage.get("io_type_key"));
             si.setOutputId(mapMessage.get("output_id"));
             si.setInputId(mapMessage.get("input_id"));
+            wantsEnvelope = "true".equalsIgnoreCase(mapMessage.get("envelope"));
         } else {
             si = new StreamInfo("netty", message);
+        }
+        String routing = routingRefusal(si);
+        if (routing != null) {
+            refuse(ctx, routing);
+            return;
         }
 
         Map<String, String> response = new java.util.HashMap<>();
         String selector;
         try {
-            // never a stdin message, whatever the client's selector (StreamSelectors.NO_STDIN)
             selector = StreamSelectors.subscriptionSelector(si);
         } catch (IllegalArgumentException refused) {
             // a selector the client could shape would let it subscribe to other streams, or write reserved properties
@@ -286,6 +320,7 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
             // a refused subscription still leaves the stream usable for sending (the client may be a pure sender
             // of a stream bound to someone else); the client decides whether a refusal is an error for it
             this.streamInfo = si;
+            this.envelope = wantsEnvelope;
             this.active = true;
         }
         if (STATUS_SUBSCRIPTION_REFUSED.equals(code)) {
@@ -373,7 +408,16 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
                         // 256 KiB: 4 of 70 runs lost 1-8 frames, mostly the first run after a cold start).
                         // Now they queue within a per-consumer byte budget (EgressBudget) and only an
                         // overloaded consumer loses frames, each one counted.
-                        if (msg instanceof TextMessage) {
+                        if (envelope) {
+                            if (msg instanceof TextMessage || msg instanceof jakarta.jms.MapMessage || DataPlaneFrames.isTransferEnd(msg)) {
+                                deliver(ch, new TextWebSocketFrame(Unpooled.copiedBuffer(DataPlaneFrames.envelopeJson(msg),
+                                        java.nio.charset.StandardCharsets.UTF_8)));
+                            } else if (msg instanceof BytesMessage) {
+                                byte[] payload = new byte[(int) ((BytesMessage) msg).getBodyLength()];
+                                ((BytesMessage) msg).readBytes(payload);
+                                deliver(ch, new BinaryWebSocketFrame(Unpooled.wrappedBuffer(DataPlaneFrames.envelopeBytes(msg, payload))));
+                            }
+                        } else if (msg instanceof TextMessage) {
                             deliver(ch, new TextWebSocketFrame(Unpooled.copiedBuffer(((TextMessage) msg).getText(),
                                     java.nio.charset.StandardCharsets.UTF_8)));
                         } else if (msg instanceof jakarta.jms.MapMessage) {

@@ -23,10 +23,11 @@ import java.util.regex.Pattern;
  * every message on the shard ({@code nonexistent IS NULL} selects everything). No parentheses, NOT,
  * LIKE, IN, BETWEEN, arithmetic or escaped quotes.
  *
- * <p>A client never receives a process's stdin: every subscription wsapi makes is the client's selector
- * {@code AND} {@link #NO_STDIN} ({@link #subscriptionSelector}). The executor takes stdin only from messages whose
- * {@code type} is the runner's unguessable {@code input-<hex>} (or the development-only {@code input}); a subscriber of
- * the stream would otherwise read every line others type into it, and learn the type that lets it type too.
+ * <p>No process's stdin travels on the dataplane: the executor takes it only from its {@code write_stdin} action. wsapi
+ * refuses a stream that would write stdin ({@link DataPlaneWsHandler#stdinRefusal}); the controller refuses a
+ * subscription whose selector names it (its StdinGuard, the single enforcement point for every bundle). wsapi used to
+ * append {@code AND (type IS NULL OR (type <> 'input' ...))} to every subscription, which that guard refused, so no API
+ * client could receive.
  */
 public final class StreamSelectors {
 
@@ -75,12 +76,9 @@ public final class StreamSelectors {
 
     public static boolean value(String s) { return s != null && VALUE.matcher(s).matches(); }
 
-    /** Matches no stdin message: no {@code type}, or a {@code type} other than {@code input} and {@code input-*}. */
-    public static final String NO_STDIN = "(type IS NULL OR (type <> 'input' AND type NOT LIKE 'input-%'))";
-
-    /** The selector wsapi subscribes with for a handshake: the client's, narrowed by {@link #NO_STDIN}. */
+    /** The selector wsapi subscribes with for a handshake: the client's, checked ({@link #selectorFor}), and nothing else. */
     public static String subscriptionSelector(StreamInfo si) {
-        return "(" + selectorFor(si) + ") AND " + NO_STDIN;
+        return selectorFor(si);
     }
 
     /** The selector for a handshake, or an IllegalArgumentException saying what was refused. */
