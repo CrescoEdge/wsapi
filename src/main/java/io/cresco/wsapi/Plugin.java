@@ -188,7 +188,8 @@ public class Plugin implements PluginService {
                 // Register the central Felix HealthCheck (best-effort; must never break startup).
                 registerHealthCheck(wsPort);
             }
-            return true;
+            // started only while the server runs: after a refused start (keystore, bind) a later call must not say so
+            return this.nettyServer != null;
 
         } catch (Exception ex) {
             if (logger != null) {
