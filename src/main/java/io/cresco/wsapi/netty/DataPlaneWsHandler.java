@@ -6,6 +6,7 @@ import com.google.gson.Gson;
 import io.cresco.library.data.TopicType;
 import io.cresco.library.plugin.PluginBuilder;
 import io.cresco.library.utilities.CLogger;
+import io.cresco.wsapi.auth.Authenticator;
 import io.cresco.wsapi.websockets.StreamInfo;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
@@ -61,8 +62,11 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
     private final EgressBudget egress;
     private final long egressCap;
 
-    public DataPlaneWsHandler(PluginBuilder plugin) {
+    private final Authenticator.Principal principal;
+
+    public DataPlaneWsHandler(PluginBuilder plugin, Authenticator.Principal principal) {
         this.plugin = plugin;
+        this.principal = principal;
         this.logger = plugin.getLogger(DataPlaneWsHandler.class.getName(), CLogger.Level.Info);
         this.egressCap = plugin.getConfig().getLongParam("wsapi_dataplane_egress_buffer_bytes", 32L * 1024 * 1024);
         this.egress = new EgressBudget(egressCap,

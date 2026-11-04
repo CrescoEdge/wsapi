@@ -7,19 +7,14 @@ import io.cresco.library.plugin.PluginService;
 import io.cresco.library.utilities.CLogger;
 
 
-import org.bouncycastle.asn1.x500.X500Name;
-import org.bouncycastle.asn1.x500.X500NameBuilder;
-import org.bouncycastle.asn1.x500.style.BCStyle;
-import org.bouncycastle.asn1.x509.BasicConstraints;
-import org.bouncycastle.asn1.x509.Extension;
-import org.bouncycastle.asn1.x509.KeyUsage;
-import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
-import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
-import org.bouncycastle.jce.provider.BouncyCastleProvider;
-import org.bouncycastle.operator.ContentSigner;
-import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
-
+import io.cresco.wsapi.auth.AuthRateLimiter;
+import io.cresco.wsapi.auth.Authenticator;
+import io.cresco.wsapi.auth.CredentialFile;
+import io.cresco.wsapi.netty.ApiGateway;
 import io.cresco.wsapi.netty.NettyWsServer;
+import io.cresco.wsapi.netty.PluginGateway;
+import io.cresco.wsapi.netty.WsRouter;
+import io.cresco.wsapi.tls.WsapiKeystore;
 
 import org.apache.felix.hc.api.HealthCheck;
 import org.osgi.framework.BundleContext;
@@ -30,23 +25,16 @@ import org.osgi.service.component.annotations.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.File;
-import java.io.FileOutputStream;
-import java.math.BigInteger;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.security.KeyPair;
-import java.security.KeyPairGenerator;
-import java.security.KeyStore;
-import java.security.SecureRandom;
-import java.security.Security;
-import java.security.cert.X509Certificate;
-import java.time.Instant;
-import java.time.temporal.ChronoUnit;
-import java.util.Date;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Dictionary;
+import java.util.HashSet;
 import java.util.Hashtable;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 
 @Component(
@@ -60,8 +48,6 @@ public class Plugin implements PluginService {
 
     /** Default wss/https listen port; overridable via config key "wsapi_port". */
     private static final int DEFAULT_WS_PORT = 8282;
-    /** Default keystore/key password; overridable via config key "wsapi_keystore_password". */
-    private static final String DEFAULT_KEYSTORE_PASSWORD = "cresco";
 
     public BundleContext context;
     // Jetty instantiates the @ServerEndpoint / AuthFilter classes itself (not via DS), so they
@@ -144,23 +130,52 @@ public class Plugin implements PluginService {
                 if (portStr != null) {
                     try { wsPort = Integer.parseInt(portStr.trim()); } catch (NumberFormatException ignore) { }
                 }
-                String keystorePassword = pluginBuilder.getConfig().getStringParam("wsapi_keystore_password");
-                if (keystorePassword == null) {
-                    keystorePassword = DEFAULT_KEYSTORE_PASSWORD;
+                // --- TLS identity: PKCS12, crypto-policy key, random owner-only password; fingerprint published ---
+                io.cresco.library.plugin.Config cfg = pluginBuilder.getConfig();
+                Path dataDir = Paths.get(pluginBuilder.getPluginDataDirectory());
+                WsapiKeystore.Material tls;
+                try {
+                    tls = WsapiKeystore.loadOrCreate(tlsSettings(cfg, dataDir), new WsapiKeystore.Log() {
+                        @Override public void info(String m) { logger.info(m); }
+                        @Override public void warn(String m) { logger.warn(m); }
+                    });
+                } catch (WsapiKeystore.Refused refused) {
+                    logger.error("wsapi NOT started: " + refused.getMessage());
+                    pluginBuilder.setIsActive(false);
+                    return false;
                 }
 
-                // Ensure a self-signed keystore exists for the wss connector.
-                Path keyStorePath = Paths.get(pluginBuilder.getPluginDataDirectory() + File.separator + "ws.keystore");
-                if (!keyStorePath.toFile().exists()) {
-                    generateCertChainKeyStore(keyStorePath, keystorePassword.toCharArray());
+                // --- authentication: per-user credentials (PBKDF2-HMAC-SHA-384) and/or the legacy service key ---
+                String usersFile = cfg.getStringParam("wsapi_users_file");
+                CredentialFile users = new CredentialFile(usersFile != null ? Paths.get(usersFile) : dataDir.resolve("ws.users"),
+                        logger, System::currentTimeMillis);
+                boolean serviceKeyEnabled = cfg.getBooleanParam("wsapi_service_key_enabled", true);
+                if (!serviceKeyEnabled) {
+                    logger.info("wsapi service key authentication is disabled (wsapi_service_key_enabled=false)");
+                } else if (cfg.getStringParam("cresco_service_key") == null) {
+                    logger.info("wsapi: no cresco_service_key configured; only per-user credentials from " + users.path() + " can log in");
                 }
+                AuthRateLimiter limiter = new AuthRateLimiter(
+                        cfg.getIntegerParam("wsapi_auth_max_failures", 10),
+                        cfg.getIntegerParam("wsapi_auth_max_user_failures", 50),
+                        1000L * cfg.getIntegerParam("wsapi_auth_window_seconds", 60),
+                        1000L * cfg.getIntegerParam("wsapi_auth_lockout_seconds", 60),
+                        1000L * cfg.getIntegerParam("wsapi_auth_max_lockout_seconds", 900),
+                        10_000, System::currentTimeMillis);
+                Authenticator authenticator = new Authenticator(users::current,
+                        () -> cfg.getStringParam("cresco_service_key"),
+                        () -> cfg.getBooleanParam("wsapi_service_key_enabled", true),
+                        this::agentTenant, this::superuserTenants, limiter,
+                        1000L * cfg.getIntegerParam("wsapi_auth_cache_seconds", 300), System::currentTimeMillis);
+                int authThreads = cfg.getIntegerParam("wsapi_auth_threads",
+                        Math.max(2, Math.min(8, Runtime.getRuntime().availableProcessors() / 2)));
+                WsRouter.Gate gate = new WsRouter.Gate(authenticator, apiGateway(), authThreads,
+                        cfg.getIntegerParam("wsapi_auth_queue", 256), logger);
 
                 // --- Netty WebSocket server (replaces Jetty). One wss listener serves all three
-                //     endpoints; TLS from the same self-signed keystore; cresco_service_key auth on
-                //     the HTTP upgrade; permessage-deflate off; whole-message frame aggregation. ---
-                int ioBuf = pluginBuilder.getConfig().getIntegerParam("dataplane_io_buffer_bytes", 64 * 1024);
-                this.nettyServer = new NettyWsServer(pluginBuilder, wsPort, keyStorePath,
-                        keystorePassword.toCharArray(), ioBuf);
+                //     endpoints; every upgrade authenticated; permessage-deflate off; whole-message frame aggregation. ---
+                int ioBuf = cfg.getIntegerParam("dataplane_io_buffer_bytes", 64 * 1024);
+                this.nettyServer = new NettyWsServer(pluginBuilder, wsPort, tls.keyStore, tls.password, ioBuf, gate);
                 this.nettyServer.start();
                 // let CONFIG 'nettuning' reach the live server tunables
                 if (this.executor instanceof PluginExecutor) {
@@ -186,72 +201,41 @@ public class Plugin implements PluginService {
         }
     }
 
-    /**
-     * Generate a self-signed RSA keypair + X.509 certificate and store it in a fresh keystore.
-     * The plugin identity is split across three DN attributes (O=region, OU=agent, CN=plugin)
-     * so each value stays within the X.509 64-char attribute limit; the previous build packed
-     * region_agent_plugin into a single CN, which overflowed 64 chars and broke client parsing.
-     */
-    private void generateCertChainKeyStore(Path keyStorePath, char[] password) {
-        try {
-            if (Security.getProvider("BC") == null) {
-                Security.addProvider(new BouncyCastleProvider());
-            }
-
-            Path pluginDataDir = Paths.get(pluginBuilder.getPluginDataDirectory());
-            if (!pluginDataDir.toFile().exists()) {
-                pluginDataDir.toFile().mkdirs();
-            }
-
-            KeyStore ks = KeyStore.getInstance(KeyStore.getDefaultType());
-            ks.load(null, password);
-
-            KeyPairGenerator keyPairGenerator = KeyPairGenerator.getInstance("RSA", "BC");
-            keyPairGenerator.initialize(2048, new SecureRandom());
-            KeyPair keyPair = keyPairGenerator.generateKeyPair();
-
-            Instant notBefore = Instant.now().minus(1, ChronoUnit.DAYS);
-            Instant notAfter = notBefore.plus(365L * 5, ChronoUnit.DAYS);
-
-            X500Name subject = new X500NameBuilder(BCStyle.INSTANCE)
-                    .addRDN(BCStyle.O, boundedRDN(pluginBuilder.getRegion()))
-                    .addRDN(BCStyle.OU, boundedRDN(pluginBuilder.getAgent()))
-                    .addRDN(BCStyle.CN, boundedRDN(pluginBuilder.getPluginID()))
-                    .build();
-
-            BigInteger serial = new BigInteger(159, new SecureRandom()); // positive, unpredictable
-
-            JcaX509v3CertificateBuilder certBuilder = new JcaX509v3CertificateBuilder(
-                    subject, serial, Date.from(notBefore), Date.from(notAfter), subject, keyPair.getPublic());
-            certBuilder.addExtension(Extension.basicConstraints, true, new BasicConstraints(false));
-            certBuilder.addExtension(Extension.keyUsage, true,
-                    new KeyUsage(KeyUsage.digitalSignature | KeyUsage.keyEncipherment));
-
-            ContentSigner signer = new JcaContentSignerBuilder("SHA256WithRSA")
-                    .setProvider("BC").build(keyPair.getPrivate());
-            X509Certificate cert = new JcaX509CertificateConverter().setProvider("BC")
-                    .getCertificate(certBuilder.build(signer));
-
-            ks.setKeyEntry("wsapi", keyPair.getPrivate(), password, new X509Certificate[]{cert});
-            try (FileOutputStream fos = new FileOutputStream(keyStorePath.toString())) {
-                ks.store(fos, password);
-            }
-
-        } catch (Exception ex) {
-            if (logger != null) {
-                logger.error("generateCertChainKeyStore() failed", ex);
-            } else {
-                slog.error("generateCertChainKeyStore() failed", ex);
-            }
-        }
+    /** TLS settings from config (see {@link WsapiKeystore} and the README). */
+    private WsapiKeystore.Settings tlsSettings(io.cresco.library.plugin.Config cfg, Path dataDir) {
+        String pw = cfg.getStringParam("wsapi_keystore_password");     // a secret param: also _file / CRESCO_ env
+        String ksFile = cfg.getStringParam("wsapi_keystore_file");
+        List<String> sans = new ArrayList<>();
+        String sanCsv = cfg.getStringParam("wsapi_tls_san");
+        if (sanCsv != null) for (String x : sanCsv.split(",")) if (!x.isBlank()) sans.add(x.trim());
+        return new WsapiKeystore.Settings()
+                .dataDir(dataDir)
+                .operatorKeystore(ksFile == null ? null : Paths.get(ksFile))
+                .configuredPassword(pw == null ? null : pw.toCharArray())
+                .keyType(cfg.getStringParam("wsapi_tls_key_type", "EC"))
+                .rsaBits(cfg.getIntegerParam("wsapi_tls_rsa_bits", 3072))
+                .validityDays(cfg.getIntegerParam("wsapi_tls_validity_days", 730))
+                .extraSans(sans)
+                .identity(pluginBuilder.getRegion(), pluginBuilder.getAgent(), pluginBuilder.getPluginID());
     }
 
-    /** Clamp an RDN value to the X.509 64-char attribute limit; never null/empty. */
-    private static String boundedRDN(String value) {
-        if (value == null || value.isEmpty()) {
-            return "unknown";
-        }
-        return value.length() > 64 ? value.substring(0, 64) : value;
+    /** How API clients' messages are sent (for the authenticated client). */
+    private ApiGateway apiGateway() {
+        return new PluginGateway(pluginBuilder);
+    }
+
+    /** This agent's tenant ({@code tenant_id}, as the controller reads it). */
+    private String agentTenant() {
+        return pluginBuilder.getConfig().getStringParam("tenant_id", "default");
+    }
+
+    /** The superuser tenants ({@code broker_superuser_tenants}). */
+    private Set<String> superuserTenants() {
+        String csv = pluginBuilder.getConfig().getStringParam("broker_superuser_tenants");
+        if (csv == null || csv.isBlank()) return Collections.emptySet();
+        Set<String> out = new HashSet<>();
+        for (String t : csv.split(",")) if (!t.isBlank()) out.add(t.trim());
+        return out;
     }
 
     /** Register wsapi's Felix HealthCheck so CrescoHealthExecutor discovers it. Best-effort. */
