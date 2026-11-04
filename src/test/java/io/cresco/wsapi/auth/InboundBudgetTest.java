@@ -86,9 +86,9 @@ class InboundBudgetTest {
             @Override public void send(MsgEvent msg, Authenticator.Principal caller) { }
             @Override public MsgEvent rpc(MsgEvent msg, long timeoutMs, Authenticator.Principal caller) { return msg; }
         };
-        WsRouter.Gate gate = new WsRouter.Gate(auth, gw, 2, 16, TestSupport.logger(log)).inboundBounds(8L * MIB, 12L * MIB);
-        NettyWsServer server = new NettyWsServer(plugin, 0, tls.keyStore, tls.password, 64 * 1024, gate);
-        server.start();
+        NettyWsServer server = TestSupport.startReachable(() -> new NettyWsServer(plugin, 0, tls.keyStore, tls.password, 64 * 1024,
+                new WsRouter.Gate(auth, gw, 2, 16, TestSupport.logger(log)).inboundBounds(8L * MIB, 12L * MIB)), tls.certificate);
+        WsRouter.Gate gate = server.gate();
         try {
             KeyStore trust = KeyStore.getInstance("PKCS12");
             trust.load(null, null);
