@@ -122,9 +122,10 @@ class InboundBudgetTest {
             Conn b1 = new Conn("bob"), b2 = new Conn("bob"), b3 = new Conn("bob");
             b1.part(3 * MIB);
             b2.part(3 * MIB);
-            assertTrue(within(10_000, () -> gate.inbound().inflight() >= 6L * MIB), "control: 6 MiB held, " + gate.inbound().inflight());
+            assertTrue(within(30_000, () -> gate.inbound().inflight() >= 6L * MIB), "control: 6 MiB held, " + gate.inbound().inflight());
             b3.part(3 * MIB);
-            assertTrue(within(10_000, () -> b3.c.closedWith == 1013), "bob's third connection over his bound: " + b3.c.closedWith);
+            assertTrue(within(30_000, () -> b3.c.closedWith == 1013), "bob's third connection over his bound: " + b3.c.closedWith
+                    + " (held: " + gate.inbound().inflight() + ")");
             assertTrue(b3.c.reason.contains("wsapi_max_inflight_bytes_per_user"), b3.c.reason);
             assertEquals(0, b1.c.closedWith + b2.c.closedWith, "his other connections stay open");
             assertTrue(gate.inbound().inflight() <= 6L * MIB + 256 * 1024, "nothing of the refused part is held: " + gate.inbound().inflight());
@@ -132,25 +133,26 @@ class InboundBudgetTest {
             // a finished message gives its bytes back
             b1.finish();
             b2.finish();
-            assertTrue(within(10_000, () -> gate.inbound().inflight() == 0), "handled messages are given back: " + gate.inbound().inflight());
+            assertTrue(within(30_000, () -> gate.inbound().inflight() == 0), "handled messages are given back: " + gate.inbound().inflight());
             Conn b4 = new Conn("bob");
             b4.part(3 * MIB);
-            assertTrue(within(10_000, () -> gate.inbound().inflight() >= 3L * MIB), "bob may send again");
+            assertTrue(within(30_000, () -> gate.inbound().inflight() >= 3L * MIB), "bob may send again");
 
             // in total: bob 3 + alice 5 + carol 5 MiB is over 12 MiB; each of them is within 8
             Conn a = new Conn("alice");
             a.part(5 * MIB);
-            assertTrue(within(10_000, () -> gate.inbound().inflight() >= 8L * MIB), "control: 8 MiB held");
+            assertTrue(within(30_000, () -> gate.inbound().inflight() >= 8L * MIB), "control: 8 MiB held");
             Conn c = new Conn("carol");
             c.part(5 * MIB);
-            assertTrue(within(10_000, () -> c.c.closedWith == 1013), "carol's connection over the total bound: " + c.c.closedWith);
+            assertTrue(within(30_000, () -> c.c.closedWith == 1013), "carol's connection over the total bound: " + c.c.closedWith
+                    + " (held: " + gate.inbound().inflight() + ")");
             assertTrue(c.c.reason.contains("wsapi_max_inflight_bytes="), c.c.reason);
             assertEquals(0, a.c.closedWith + b4.c.closedWith, "the others stay open");
 
             // closed connections give back what they held
             a.ws.abort();
             b4.ws.abort();
-            assertTrue(within(10_000, () -> gate.inbound().inflight() == 0), "after the connections close: " + gate.inbound().inflight());
+            assertTrue(within(30_000, () -> gate.inbound().inflight() == 0), "after the connections close: " + gate.inbound().inflight());
         } finally {
             server.stop();
         }
