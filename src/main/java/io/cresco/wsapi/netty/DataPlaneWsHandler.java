@@ -109,8 +109,9 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
                 if (!active) {
                     handshake(ctx, message);
                 } else {
-                    // data text -> broker
-                    DATAPLANE_BYTES.addAndGet(message.length());
+                    // data text -> broker. Bytes, not characters: the frame's UTF-8 payload (a multi-byte character
+                    // counted 1 where it carries 2-4 bytes, so wsapi.dataplane.bytes under-reported text traffic)
+                    DATAPLANE_BYTES.addAndGet(utf8Bytes((TextWebSocketFrame) frame));
                     DATAPLANE_MESSAGES.incrementAndGet();
                     TextMessage tm = plugin.getAgentService().getDataPlaneService().createTextMessage();
                     tm.setText(message);
@@ -137,6 +138,11 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
         } catch (Exception ex) {
             logger.error("DataPlaneWsHandler.channelRead0: " + ex.getMessage());
         }
+    }
+
+    /** The size of a text frame's payload in bytes (its UTF-8 encoding), not in characters. */
+    static long utf8Bytes(TextWebSocketFrame frame) {
+        return frame.content().readableBytes();
     }
 
     private void handshake(ChannelHandlerContext ctx, String message) {
