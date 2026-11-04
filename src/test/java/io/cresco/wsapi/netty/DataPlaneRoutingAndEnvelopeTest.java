@@ -115,6 +115,108 @@ class DataPlaneRoutingAndEnvelopeTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void plainMapFramesNameTheirWriterAndAUserCannotForgeIt() throws Exception {
+        ActiveMQMapMessage real = new ActiveMQMapMessage();
+        real.setString("cmd", "execution_log");
+        real.setStringProperty("cresco_caller", "plugin:tenant-a/region-1/agent-1/plugin-3");
+        real.setStringProperty("cresco_caller_roles", "plugin");
+        Map<String, Object> m = GSON.fromJson(DataPlaneFrames.withWriter(DataPlaneFrames.mapJson(real), real), Map.class);
+        assertEquals("execution_log", m.get("cmd"), "the event as before");
+        assertEquals("plugin:tenant-a/region-1/agent-1/plugin-3", m.get("cresco_writer"));
+        assertEquals("plugin", m.get("cresco_writer_roles"));
+
+        assertTrue(DataPlaneFrames.claimsWriter("{\"cmd\":\"execution_log\",\"cresco_writer\":\"plugin:x\"}"));
+        assertTrue(DataPlaneFrames.claimsWriter("  {\"cresco_writer_roles\":\"plugin\"}"));
+        assertFalse(DataPlaneFrames.claimsWriter("{\"cmd\":\"execution_log\"}"));
+        assertFalse(DataPlaneFrames.claimsWriter("the word cresco_writer in a line of text"));
+        assertFalse(DataPlaneFrames.claimsWriter("{\"note\":\"cresco_writer\"}"), "only a top-level key");
+
+        ReviewApiDataplaneTest.Recorder rec = new ReviewApiDataplaneTest.Recorder();
+        PluginBuilder plugin = ReviewApiDataplaneTest.plugin(rec);
+        EmbeddedChannel ch = new EmbeddedChannel(new DataPlaneWsHandler(plugin, ReviewApiDataplaneTest.principal("tenant-a", "bob", "user"),
+                ReviewApiDataplaneTest.gate(plugin, new ArrayList<>())));
+        ch.writeInbound(new TextWebSocketFrame(GSON.toJson(Map.of("ident_key", "stream_name", "ident_id", "u:bob:x", "io_type_key", "type", "input_id", "data"))));
+        assertEquals("10", ReviewApiDataplaneTest.reply(ch).get("status_code"));
+        ch.writeInbound(new TextWebSocketFrame("{\"cmd\":\"execution_log\",\"cresco_writer\":\"plugin:tenant-a/r/a/plugin-3\"}"));
+        assertEquals(0, rec.sent.size(), "the forged writer was not published");
+        Object close = ch.readOutbound();
+        assertTrue(close instanceof io.netty.handler.codec.http.websocketx.CloseWebSocketFrame, String.valueOf(close));
+        assertEquals(1008, ((io.netty.handler.codec.http.websocketx.CloseWebSocketFrame) close).statusCode());
+    }
+
+    @Test
+    void onItsOwnStreamAUserMayWriteAnyTypeOnAGrantedOneNotTheExecutors() throws Exception {
+        java.lang.reflect.Constructor<Authenticator.Principal> c = Authenticator.Principal.class.getDeclaredConstructor(
+                String.class, String.class, String.class, boolean.class, List.class);
+        c.setAccessible(true);
+        Authenticator.Principal bob = c.newInstance("tenant-a", "bob", "user", false, List.of("job-7*"));
+        for (String type : new String[]{"output", "error", "event"}) {
+            io.cresco.wsapi.websockets.StreamInfo own = new io.cresco.wsapi.websockets.StreamInfo("t", "stream_name", "u:bob:x");
+            own.setIoTypeKey("type");
+            own.setInputId(type);
+            assertNull(DataPlaneWsHandler.userStreamRefusal(own, bob), type);
+            io.cresco.wsapi.websockets.StreamInfo granted = new io.cresco.wsapi.websockets.StreamInfo("t", "stream_name", "job-7");
+            granted.setIoTypeKey("type");
+            granted.setInputId(type);
+            assertNotNull(DataPlaneWsHandler.userStreamRefusal(granted, bob), type);
+        }
+        io.cresco.wsapi.websockets.StreamInfo note = new io.cresco.wsapi.websockets.StreamInfo("t", "stream_name", "job-7");
+        note.setIoTypeKey("type");
+        note.setInputId("note");
+        assertNull(DataPlaneWsHandler.userStreamRefusal(note, bob), "other types on a granted stream");
+    }
+
+    @Test
+    void aClosedLogStreamTurnsLoggingOffAndEachAdminHoldsAFairShareOfThePool() throws Exception {
+        ReviewApiDataplaneTest.Recorder rec = new ReviewApiDataplaneTest.Recorder();
+        PluginBuilder plugin = ReviewApiDataplaneTest.plugin(rec);
+        List<Object[]> rpcs = java.util.Collections.synchronizedList(new ArrayList<>());
+        WsRouter.Gate gate = ReviewApiDataplaneTest.gate(plugin, rpcs);
+        EmbeddedChannel ch = new EmbeddedChannel(new LogStreamerWsHandler(plugin, ReviewApiDataplaneTest.principal("tenant-a", "alice", "admin"), gate));
+        ch.writeInbound(new TextWebSocketFrame("region-1,agent-1,Info,io.cresco"));
+        long until = System.currentTimeMillis() + 5_000;
+        while (rpcs.size() < 2 && System.currentTimeMillis() < until) Thread.sleep(20);
+        Thread.sleep(100);
+        ch.close();                                                   // configured, then closed
+        until = System.currentTimeMillis() + 5_000;
+        while (rpcs.size() < 3 && System.currentTimeMillis() < until) Thread.sleep(20);
+        MsgEvent off = (MsgEvent) rpcs.get(rpcs.size() - 1)[0];
+        assertEquals("setlogdp", off.getParam("action"));
+        assertEquals("false", off.getParam("setlogdp"));
+
+        // one admin, many streams, all waiting on a slow agent: at most its share of the pool, the rest told to retry
+        CountDownLatch release = new CountDownLatch(1);
+        ApiGateway slow = new ApiGateway() {
+            @Override public void send(MsgEvent msg, Authenticator.Principal caller) { }
+            @Override public MsgEvent rpc(MsgEvent msg, long timeoutMs, Authenticator.Principal caller) {
+                try {
+                    release.await(10, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                msg.setParam("status_code", "7");
+                return msg;
+            }
+        };
+        Authenticator auth = new Authenticator(CredentialStore::empty, () -> null, () -> true, () -> "tenant-a", Set::of,
+                AuthRateLimiter.defaults(), 0L, System::currentTimeMillis);
+        WsRouter.Gate g2 = new WsRouter.Gate(auth, slow, 1, 4, plugin.getLogger("t", CLogger.Level.Info));
+        int busy = 0;
+        try {
+            for (int i = 0; i < 5; i++) {
+                EmbeddedChannel s = new EmbeddedChannel(new LogStreamerWsHandler(plugin, ReviewApiDataplaneTest.principal("tenant-a", "carl", "admin"), g2));
+                s.writeInbound(new TextWebSocketFrame("region-1,agent-" + i + ",Info,io.cresco"));
+                Object o = s.readOutbound();
+                if (o instanceof TextWebSocketFrame && ((TextWebSocketFrame) o).text().startsWith("busy:")) busy++;
+            }
+        } finally {
+            release.countDown();
+        }
+        assertEquals(5 - LogStreamerWsHandler.POOL_SHARE_PER_ADMIN, busy);
+    }
+
+    @Test
     void theServiceKeysLimitsCountPerSourceHost() throws Exception {
         String strong = "0123456789abcdef".repeat(3);              // test-only, 48 hex digits
         Authenticator a = new Authenticator(CredentialStore::empty, () -> strong, () -> true, () -> "tenant-a", Set::of,

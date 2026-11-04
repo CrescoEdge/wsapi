@@ -119,6 +119,11 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
                     DATAPLANE_BYTES.addAndGet(utf8Bytes((TextWebSocketFrame) frame));
                     DATAPLANE_MESSAGES.incrementAndGet();
                     if (streamInfo.getIdentKey() == null) return;      // a selector session only receives
+                    if (DataPlaneFrames.claimsWriter(message)) {
+                        // a JSON object naming a writer would pass for an infrastructure event in plain frames
+                        closeRefused(ctx.channel(), "a frame may not carry the reserved key " + DataPlaneFrames.WRITER_KEY);
+                        return;
+                    }
                     TextMessage tm = plugin.getAgentService().getDataPlaneService().createTextMessage();
                     tm.setText(message);
                     route(tm);
@@ -233,11 +238,16 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
             // every property a user's message carries routes it: only its own stream_name and a type
             return p + " may set only type (io_type_key=type) beside its stream_name, not " + si.getIoTypeKey();
         }
-        if ("type".equals(si.getIoTypeKey()) && "output".equals(si.getInputId()) && !si.getIdentId().startsWith(ownPrefix(p))) {
-            return p + " may write type=output only on its own streams";
+        if ("type".equals(si.getIoTypeKey()) && si.getInputId() != null && EXECUTOR_TYPES.contains(si.getInputId())
+                && !si.getIdentId().startsWith(ownPrefix(p))) {
+            // on a granted stream these would read as the process's own stdout, stderr or exit event
+            return p + " may write type=" + si.getInputId() + " (a type the executor writes) only on its own streams";
         }
         return null;
     }
+
+    /** The types the executor writes on a process's stream: its stdout, its stderr, and its events (execution_log ...). */
+    static final java.util.Set<String> EXECUTOR_TYPES = java.util.Set.of("output", "error", "event");
 
     /**
      * A handshake whose io_type_key names its ident's own property (for everyone): the second value would replace the
@@ -421,13 +431,15 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
                             deliver(ch, new TextWebSocketFrame(Unpooled.copiedBuffer(((TextMessage) msg).getText(),
                                     java.nio.charset.StandardCharsets.UTF_8)));
                         } else if (msg instanceof jakarta.jms.MapMessage) {
-                            // executor exit events and other map events: their entries as JSON (were dropped)
+                            // executor exit events and other map events: their entries as JSON, with their writer
                             deliver(ch, new TextWebSocketFrame(Unpooled.copiedBuffer(
-                                    DataPlaneFrames.mapJson((jakarta.jms.MapMessage) msg), java.nio.charset.StandardCharsets.UTF_8)));
+                                    DataPlaneFrames.withWriter(DataPlaneFrames.mapJson((jakarta.jms.MapMessage) msg), msg),
+                                    java.nio.charset.StandardCharsets.UTF_8)));
                         } else if (DataPlaneFrames.isTransferEnd(msg)) {
                             // a streamfile terminal frame: its status and SHA-384, for the client to verify the transfer
                             deliver(ch, new TextWebSocketFrame(Unpooled.copiedBuffer(
-                                    DataPlaneFrames.transferEndJson(msg), java.nio.charset.StandardCharsets.UTF_8)));
+                                    DataPlaneFrames.withWriter(DataPlaneFrames.transferEndJson(msg), msg),
+                                    java.nio.charset.StandardCharsets.UTF_8)));
                         } else if (msg instanceof BytesMessage) {
                             String transferId = msg.getStringProperty("transfer_id");
                             long dataSize = ((BytesMessage) msg).getBodyLength();

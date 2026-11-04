@@ -162,6 +162,8 @@ public class Plugin implements PluginService {
                         100_000, System::currentTimeMillis);
                 limiter.knownGoodTtlMs(24L * 3600_000L * Math.max(1, cfg.getIntegerParam("wsapi_auth_known_good_days", 30)));
                 io.cresco.wsapi.auth.Sources.ipv6PrefixBits(cfg.getIntegerParam("wsapi_auth_ipv6_prefix_bits", 64));
+                io.cresco.wsapi.auth.Sources.shareIpv4PrefixBits(cfg.getIntegerParam("wsapi_auth_share_ipv4_prefix_bits", 24));
+                limiter.delayedCheckMs(1000L * cfg.getIntegerParam("wsapi_auth_delayed_check_seconds", 30));
                 // the sources each user logged in from, kept across restarts (keyed hashes, owner-only files)
                 this.knownGood = new KnownGoodFile(dataDir, m -> logger.warn(m));
                 knownGood.load(limiter);
