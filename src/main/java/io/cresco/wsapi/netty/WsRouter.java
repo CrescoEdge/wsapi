@@ -43,7 +43,17 @@ public class WsRouter extends SimpleChannelInboundHandler<FullHttpRequest> {
     static final String DATAPLANE_PATH = "/api/dataplane";
     static final String APISOCKET_PATH = "/api/apisocket";
     static final String LOGSTREAMER_PATH = "/api/logstreamer";
-    static final int MAX_WS_MESSAGE = 1 << 30; // 1GB, matches jakarta setMaxBinaryMessageBufferSize
+    /**
+     * Default largest message per endpoint (bytes). The API socket carries RPCs, including plugin jar uploads (base64,
+     * about 4/3 of the jar: a 26 MB controller.jar is about 35 MB); the log stream only short configuration lines; the
+     * dataplane bulk frames (pycrescolib reads up to 64 MiB). A larger message closes the connection with WebSocket
+     * status 1009 (message too big). Every endpoint used to accept 1 GiB, buffered whole per connection.
+     */
+    static final int DEFAULT_API_MAX_MESSAGE = 64 << 20;
+    static final int DEFAULT_LOGSTREAMER_MAX_MESSAGE = 64 << 10;
+    static final int DEFAULT_DATAPLANE_MAX_MESSAGE = 64 << 20;
+    /** The largest cap a setting may ask for (the old fixed limit). */
+    static final int MAX_WS_MESSAGE = 1 << 30;
 
     /** Authentication for every upgrade: the authenticator, its worker pool and the refusal log. */
     public static final class Gate {
@@ -162,14 +172,16 @@ public class WsRouter extends SimpleChannelInboundHandler<FullHttpRequest> {
                 default:               endpoint = new LogStreamerWsHandler(plugin, r.principal, gate); break;
             }
 
+            String capKey = capKey(path);
+            int cap = maxMessageBytes(plugin, path);
             WebSocketServerProtocolConfig cfg = WebSocketServerProtocolConfig.newBuilder()
                     .websocketPath(path)
-                    .maxFramePayloadLength(MAX_WS_MESSAGE)
+                    .maxFramePayloadLength(cap)      // one frame over the cap: the decoder closes with 1009
                     .allowExtensions(false)          // permessage-deflate stays OFF
                     .build();
 
             ctx.pipeline().addLast(new WebSocketServerProtocolHandler(cfg));
-            ctx.pipeline().addLast(new WebSocketFrameAggregator(MAX_WS_MESSAGE)); // whole-message delivery
+            ctx.pipeline().addLast(new CappedFrameAggregator(cap, capKey)); // whole-message delivery, the same cap
             ctx.pipeline().addLast(endpoint);
             ctx.pipeline().remove(this); // router done; hand the upgrade to the protocol handler
 
@@ -177,6 +189,54 @@ public class WsRouter extends SimpleChannelInboundHandler<FullHttpRequest> {
             ctx.fireChannelRead(req.retain());
         } finally {
             req.release();
+        }
+    }
+
+    /** The config key of an endpoint's message cap. */
+    static String capKey(String path) {
+        switch (path) {
+            case DATAPLANE_PATH: return "wsapi_dataplane_max_message_bytes";
+            case LOGSTREAMER_PATH: return "wsapi_logstreamer_max_message_bytes";
+            default: return "wsapi_api_max_message_bytes";
+        }
+    }
+
+    /** An endpoint's message cap: its config key, else the default; within [1 KiB, 1 GiB]. */
+    static int maxMessageBytes(PluginBuilder plugin, String path) {
+        int dflt = DATAPLANE_PATH.equals(path) ? DEFAULT_DATAPLANE_MAX_MESSAGE
+                : LOGSTREAMER_PATH.equals(path) ? DEFAULT_LOGSTREAMER_MAX_MESSAGE : DEFAULT_API_MAX_MESSAGE;
+        Integer v = null;
+        try {
+            v = plugin == null ? null : plugin.getConfig().getIntegerParam(capKey(path));
+        } catch (RuntimeException ignore) {
+            // not a number: the default
+        }
+        int cap = v == null ? dflt : v;
+        return Math.max(1024, Math.min(MAX_WS_MESSAGE, cap));
+    }
+
+    /**
+     * Aggregates fragmented messages up to the cap. A message whose fragments add up to more closes the connection
+     * with WebSocket status 1009 and a reason naming the cap, instead of buffering it (the stock aggregator only raised
+     * an exception and dropped the connection without a status).
+     */
+    static final class CappedFrameAggregator extends WebSocketFrameAggregator {
+        private final int cap;
+        private final String key;
+
+        CappedFrameAggregator(int cap, String key) {
+            super(cap);
+            this.cap = cap;
+            this.key = key;
+        }
+
+        @Override
+        protected void handleOversizedMessage(ChannelHandlerContext ctx, io.netty.handler.codec.http.websocketx.WebSocketFrame oversized) {
+            // the aggregator releases the oversized frame (and what it had gathered) itself
+            ctx.writeAndFlush(new io.netty.handler.codec.http.websocketx.CloseWebSocketFrame(
+                            io.netty.handler.codec.http.websocketx.WebSocketCloseStatus.MESSAGE_TOO_BIG,
+                            "message larger than " + cap + " bytes (" + key + ")"))
+                    .addListener(ChannelFutureListener.CLOSE);
         }
     }
 

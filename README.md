@@ -100,6 +100,12 @@ the agent's tenant from the controller; until the controller knows it, every cli
 | `wsapi_auth_cache_seconds` | 300 | how long a verified password is remembered; 0 turns it off |
 | `wsapi_auth_threads` / `wsapi_auth_queue` | cores/2 (2-8) / 256 | authentication workers; a full queue answers 503 |
 | `wsapi_upgrade_timeout_seconds` | 30 | a connection that has not completed an authenticated WebSocket upgrade by then is closed |
+| `wsapi_api_max_message_bytes` | 67108864 (64 MiB) | largest API-socket message; room for a plugin jar upload (base64, about 4/3 of the jar) |
+| `wsapi_logstreamer_max_message_bytes` | 65536 (64 KiB) | largest log-stream message (configuration lines) |
+| `wsapi_dataplane_max_message_bytes` | 67108864 (64 MiB) | largest dataplane message |
+
+A message over its endpoint's cap, in one frame or in fragments, closes the connection with WebSocket status 1009
+(message too big), its reason naming the setting. Every endpoint used to accept 1 GiB, buffered whole per connection.
 
 ### The dataplane
 

@@ -63,6 +63,8 @@ class WsapiServerAuthTest {
         Map<String, Object> config = new HashMap<>();
         config.put("pluginID", "plugin/9");
         config.put("wsapi_upgrade_timeout_seconds", "2");
+        config.put("wsapi_api_max_message_bytes", "65536");
+        config.put("wsapi_dataplane_max_message_bytes", "131072");
         plugin = TestSupport.pluginBuilder(dir, config, log);
         tls = WsapiKeystore.loadOrCreate(new WsapiKeystore.Settings().dataDir(dir).identity("region-1", "agent-1", "plugin/9").hostSans(false),
                 new WsapiKeystore.Log() {
@@ -116,7 +118,21 @@ class WsapiServerAuthTest {
 
     static final class Client implements WebSocket.Listener {
         final LinkedBlockingQueue<String> got = new LinkedBlockingQueue<>();
+        final java.util.concurrent.CompletableFuture<Integer> closed = new java.util.concurrent.CompletableFuture<>();
+        volatile String closeReason;
         WebSocket ws;
+
+        @Override
+        public CompletionStage<?> onClose(WebSocket webSocket, int statusCode, String reason) {
+            closeReason = reason;
+            closed.complete(statusCode);
+            return null;
+        }
+
+        @Override
+        public void onError(WebSocket webSocket, Throwable error) {
+            closed.complete(-1);
+        }
         private final StringBuilder part = new StringBuilder();
 
         @Override
@@ -272,6 +288,63 @@ class WsapiServerAuthTest {
         Thread.sleep(2500);
         rpc(c, Map.of("action", "listregions"));
         c.ws.abort();
+    }
+
+    static String text(int n) {
+        return "x".repeat(n);
+    }
+
+    @Test
+    void anOversizedApiMessageClosesTheConnectionWith1009() throws Exception {
+        // within the cap (64 KiB here): answered
+        Client ok = open(WsRouter.APISOCKET_PATH, basic("bob", "bob-password-22"));
+        assertTrue(rpc(ok, Map.of("action", "listregions", "blob", text(60_000))).contains("listregions"));
+        ok.ws.abort();
+        // one frame over the cap: the decoder closes with 1009
+        Client one = open(WsRouter.APISOCKET_PATH, basic("bob", "bob-password-22"));
+        one.ws.sendText(text(70_000), true);
+        assertEquals(1009, one.closed.get(10, TimeUnit.SECONDS));
+        // fragments that add up to more than the cap: the aggregator closes with 1009 and names the setting
+        Client frag = open(WsRouter.APISOCKET_PATH, basic("bob", "bob-password-22"));
+        frag.ws.sendText(text(40_000), false).get(5, TimeUnit.SECONDS);
+        frag.ws.sendText(text(40_000), true);
+        assertEquals(1009, frag.closed.get(10, TimeUnit.SECONDS));
+        assertTrue(String.valueOf(frag.closeReason).contains("wsapi_api_max_message_bytes"), frag.closeReason);
+    }
+
+    @Test
+    void theDataplaneAndTheLogStreamHaveTheirOwnCaps() throws Exception {
+        // the dataplane (128 KiB here) takes a 100 KB frame that the API socket would refuse ...
+        Client dp = open(WsRouter.DATAPLANE_PATH, basic("bob", "bob-password-22"));
+        dp.ws.sendBinary(java.nio.ByteBuffer.wrap(new byte[100_000]), true).get(5, TimeUnit.SECONDS);
+        Thread.sleep(500);
+        assertFalse(dp.closed.isDone(), "a frame within the dataplane cap keeps the stream open");
+        // ... and closes with 1009 over its own cap
+        dp.ws.sendBinary(java.nio.ByteBuffer.wrap(new byte[140_000]), true);
+        assertEquals(1009, dp.closed.get(10, TimeUnit.SECONDS));
+        // the log stream takes short configuration lines only (default 64 KiB)
+        Client ls = open(WsRouter.LOGSTREAMER_PATH, basic("alice", "alice-password-1"));
+        ls.ws.sendText(text(70_000), true);
+        assertEquals(1009, ls.closed.get(10, TimeUnit.SECONDS));
+    }
+
+    @Test
+    void capsComeFromConfigWithinBounds() {
+        assertEquals(64 << 20, WsRouter.maxMessageBytes(null, WsRouter.APISOCKET_PATH));
+        assertEquals(64 << 10, WsRouter.maxMessageBytes(null, WsRouter.LOGSTREAMER_PATH));
+        assertEquals(64 << 20, WsRouter.maxMessageBytes(null, WsRouter.DATAPLANE_PATH));
+        assertEquals(65536, WsRouter.maxMessageBytes(plugin, WsRouter.APISOCKET_PATH));
+        assertEquals(131072, WsRouter.maxMessageBytes(plugin, WsRouter.DATAPLANE_PATH));
+        assertEquals("wsapi_dataplane_max_message_bytes", WsRouter.capKey(WsRouter.DATAPLANE_PATH));
+        Map<String, Object> cfg = new HashMap<>();
+        cfg.put("pluginID", "plugin/8");
+        cfg.put("wsapi_api_max_message_bytes", "5");
+        cfg.put("wsapi_dataplane_max_message_bytes", "999999999999");
+        cfg.put("wsapi_logstreamer_max_message_bytes", "lots");
+        PluginBuilder pb = TestSupport.pluginBuilder(dir, cfg, log);
+        assertEquals(1024, WsRouter.maxMessageBytes(pb, WsRouter.APISOCKET_PATH), "at least 1 KiB");
+        assertEquals(64 << 20, WsRouter.maxMessageBytes(pb, WsRouter.DATAPLANE_PATH), "not an int: the default");
+        assertEquals(64 << 10, WsRouter.maxMessageBytes(pb, WsRouter.LOGSTREAMER_PATH), "not a number: the default");
     }
 
     @Test
