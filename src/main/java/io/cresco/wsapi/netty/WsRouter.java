@@ -437,8 +437,17 @@ public class WsRouter extends SimpleChannelInboundHandler<FullHttpRequest> {
         ctx.writeAndFlush(response(status, body)).addListener(ChannelFutureListener.CLOSE);
     }
 
-    private static FullHttpResponse response(HttpResponseStatus status, String body) {
-        FullHttpResponse resp = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, status,
+    /**
+     * An error answer to an upgrade: the reason is the body and, when it is short printable ASCII, also the status line's
+     * reason phrase ("HTTP/1.1 429 too many open connections for this user; ..."), since some WebSocket clients (Netty's)
+     * report a refused upgrade's status line and headers but not its body.
+     */
+    static FullHttpResponse response(HttpResponseStatus status, String body) {
+        HttpResponseStatus line = status;
+        if (body != null && !body.isEmpty() && body.length() <= 200 && body.chars().allMatch(c -> c >= 0x20 && c < 0x7f)) {
+            line = new HttpResponseStatus(status.code(), body);
+        }
+        FullHttpResponse resp = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, line,
                 Unpooled.copiedBuffer(body == null ? "" : body, CharsetUtil.UTF_8));
         resp.headers().set(HttpHeaderNames.CONTENT_TYPE, "text/plain; charset=UTF-8");
         HttpUtil.setContentLength(resp, resp.content().readableBytes());
