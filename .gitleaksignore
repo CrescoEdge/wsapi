@@ -1,0 +1,5 @@
+# Test fixtures, not secrets: the sequential hex string 0123456789abcdef (x3) used as a "strong" service key in tests.
+# ReviewApi2AuthTest is the reviewer's adversarial test (kept unmodified); the second line is the same value in a test
+# of ours, since replaced by a runtime-built value. Fingerprints: commit:file:rule:line.
+ea7b0537b8786c25c928c10caf01b28165454d91:src/test/java/io/cresco/wsapi/auth/ReviewApi2AuthTest.java:generic-api-key:26
+ea7b0537b8786c25c928c10caf01b28165454d91:src/test/java/io/cresco/wsapi/netty/DataPlaneRoutingAndEnvelopeTest.java:generic-api-key:119
