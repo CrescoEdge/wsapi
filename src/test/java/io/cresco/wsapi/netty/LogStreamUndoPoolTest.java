@@ -56,8 +56,9 @@ class LogStreamUndoPoolTest {
         CountDownLatch release = new CountDownLatch(1);
         List<Runnable> blockers = new ArrayList<>();
         try {
-            int capacity = pools.config.getMaximumPoolSize() - pools.config.getActiveCount() + pools.config.getQueue().remainingCapacity();
-            for (int i = 0; i < capacity; i++) {
+            // fill it until it refuses (a computed capacity raced with an idle worker picking up its first task)
+            boolean full = false;
+            for (int i = 0; i < 1_000 && !full; i++) {
                 Runnable r = () -> {
                     try {
                         release.await(20, TimeUnit.SECONDS);
@@ -65,11 +66,15 @@ class LogStreamUndoPoolTest {
                         Thread.currentThread().interrupt();
                     }
                 };
-                pools.config.execute(r);
-                blockers.add(r);
+                try {
+                    pools.config.execute(r);
+                    blockers.add(r);
+                } catch (java.util.concurrent.RejectedExecutionException refused) {
+                    full = true;
+                }
             }
-            assertThrows(java.util.concurrent.RejectedExecutionException.class, () -> pools.config.execute(() -> { }),
-                    "control: the configuration pool is full");
+            assertTrue(full && blockers.size() >= LogStreamPools.CONFIG_THREADS + LogStreamPools.CONFIG_QUEUE - 1,
+                    "control: the configuration pool is full (" + blockers.size() + " blocked)");
 
             ch.close();
             until = System.currentTimeMillis() + 5_000;
