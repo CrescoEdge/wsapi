@@ -67,14 +67,22 @@ import java.util.Set;
  *       alternative names {@code localhost}, this host's names and addresses, and {@code wsapi_tls_san}.</li>
  *   <li>{@code ws.keystore.pass}: the keystore password, 32 random bytes, mode 0600, read only if owner-only
  *       ({@link OwnerOnlyFile}). {@code wsapi_keystore_password} (or {@code wsapi_keystore_password_file}) replaces
- *       it; it must have at least 12 characters and is never the old default.</li>
+ *       it when it has at least 12 characters and is not the old default; a weaker one is never used to protect a
+ *       keystore.</li>
  *   <li>{@code ws.crt.pem} and {@code ws.fingerprint}: the certificate and its SHA-256 and SHA-384 fingerprints, for
  *       clients to trust (CA file) or pin. Public; rewritten at every start.</li>
  * </ul>
- * An existing keystore is used when it opens and meets the policy. One that does not (an older wsapi's RSA-2048 /
- * SHA-256 certificate under the default password {@code cresco}, a JKS store, an expired certificate) is deleted and
- * replaced, with a WARNING naming the old and new fingerprints. A keystore that its own password file does not open is
- * refused (it may have been tampered with): wsapi does not start until an operator deletes both files.
+ * An existing keystore keeps loading, and its certificate keeps being served, so clients that trust it keep working:
+ * <ul>
+ *   <li>one that only opens under the old default password {@code cresco} or a weak configured password, or that is
+ *       JKS, is re-saved as PKCS12 under a random password ({@code ws.keystore.pass}); the certificate is unchanged;</li>
+ *   <li>a certificate below the crypto policy (an older wsapi's RSA-2048 / {@code SHA256withRSA}) is logged as a
+ *       WARNING at every start; {@code wsapi_tls_replace_noncompliant=true} replaces it with a policy-strength one
+ *       (clients must then trust the new fingerprint);</li>
+ *   <li>an expired certificate is replaced (a verifying client could not use it anyway).</li>
+ * </ul>
+ * A replacement logs a WARNING naming the old and new fingerprints. A keystore that none of its passwords opens is
+ * refused (it may have been tampered with): wsapi does not start until an operator deletes it and its password file.
  *
  * <p><b>Operator keystore</b>: {@code wsapi_keystore_file} names a PKCS12 file (for a CA-issued certificate) and
  * {@code wsapi_keystore_password} its password. It is never modified or replaced; a store that does not meet the policy
@@ -87,7 +95,7 @@ public final class WsapiKeystore {
     public static final String CERT_PEM = "ws.crt.pem";
     public static final String FINGERPRINT_FILE = "ws.fingerprint";
     public static final String ALIAS = "wsapi";
-    /** The password older wsapi builds used for every keystore. Never accepted. */
+    /** The password older wsapi builds used for every keystore: opens an existing one, never protects one. */
     static final String LEGACY_DEFAULT_PASSWORD = "cresco";
     static final int MIN_CONFIGURED_PASSWORD_CHARS = 12;
     static final int MIN_RSA_BITS = 3072;
@@ -115,6 +123,7 @@ public final class WsapiKeystore {
         List<String> extraSans = new ArrayList<>();
         String region = "unknown", agent = "unknown", plugin = "unknown";
         boolean hostSans = true;
+        boolean replaceNonCompliant = false;
 
         public Settings dataDir(Path p) { dataDir = p; return this; }
         public Settings operatorKeystore(Path p) { operatorKeystore = p; return this; }
@@ -126,6 +135,8 @@ public final class WsapiKeystore {
         public Settings identity(String region, String agent, String plugin) { this.region = region; this.agent = agent; this.plugin = plugin; return this; }
         /** Tests turn off this host's names and addresses in the SAN list. */
         public Settings hostSans(boolean b) { hostSans = b; return this; }
+        /** Replace an existing certificate that is below the crypto policy ({@code wsapi_tls_replace_noncompliant}). */
+        public Settings replaceNonCompliant(boolean b) { replaceNonCompliant = b; return this; }
     }
 
     /** The loaded identity. */
@@ -188,68 +199,90 @@ public final class WsapiKeystore {
 
     // ------------------------------------------------------------------ managed keystore
 
+    private static boolean strong(char[] pw) {
+        return pw != null && pw.length >= MIN_CONFIGURED_PASSWORD_CHARS && !new String(pw).equals(LEGACY_DEFAULT_PASSWORD);
+    }
+
+    /** An existing keystore, opened. */
+    private static final class Opened {
+        final KeyStore store;
+        final char[] password;
+        final String source;
+        final boolean jks;
+
+        Opened(KeyStore store, char[] password, String source, boolean jks) {
+            this.store = store;
+            this.password = password;
+            this.source = source;
+            this.jks = jks;
+        }
+    }
+
     private static Material managed(Settings s, Log log) {
         Path ks = s.dataDir.resolve(KEYSTORE);
         Path passFile = s.dataDir.resolve(PASSWORD_FILE);
-        char[] password = s.configuredPassword;
-        boolean configured = password != null && password.length > 0;
-        if (configured) {
-            if (password.length < MIN_CONFIGURED_PASSWORD_CHARS || new String(password).equals(LEGACY_DEFAULT_PASSWORD)) {
-                throw new Refused("wsapi_keystore_password is too weak (fewer than " + MIN_CONFIGURED_PASSWORD_CHARS
-                        + " characters, or the old default); remove it to let wsapi keep a random password in " + passFile);
-            }
-        } else if (Files.exists(passFile)) {
+        char[] configured = (s.configuredPassword != null && s.configuredPassword.length > 0) ? s.configuredPassword : null;
+        boolean configuredStrong = strong(configured);
+        char[] filePassword = null;
+        if (Files.exists(passFile)) {
             try {
-                password = OwnerOnlyFile.read(passFile, PASSWORD_FILE).toCharArray();
+                filePassword = OwnerOnlyFile.read(passFile, PASSWORD_FILE).toCharArray();
             } catch (OwnerOnlyFile.UnsafeFileException e) {
                 throw new Refused("the wsapi keystore password file is unsafe: " + e.getMessage(), e);
             }
-            if (password.length == 0) throw new Refused(passFile + " is empty; delete it and " + ks + " to regenerate");
-        } else {
-            password = null;
+            if (filePassword.length == 0) throw new Refused(passFile + " is empty; delete it and " + ks + " to make a new keystore");
         }
 
         if (Files.exists(ks)) {
-            String replaceWhy;
-            X509Certificate old = null;
-            if (password != null) {
-                KeyStore store;
-                try {
-                    store = open(ks, password);
-                } catch (Exception e) {
-                    throw new Refused("the wsapi keystore " + ks + " does not open with " + (configured ? "wsapi_keystore_password" : passFile.toString())
-                            + " (" + e.getMessage() + "); it may have been replaced. Delete " + ks + " and " + passFile
-                            + " to make a new one (clients must then pin the new fingerprint)", e);
+            Opened o = openExisting(ks, configured, filePassword, passFile);
+            ServedIdentity id = servedIdentity(o.store, o.password, ks);
+            X509Certificate cert = id.cert;
+            String policy = policyProblem(cert);
+            String replaceWhy = expired(cert) ? "its certificate expired on " + cert.getNotAfter().toInstant()
+                    : (policy != null && s.replaceNonCompliant) ? policy + " (wsapi_tls_replace_noncompliant=true)" : null;
+            if (replaceWhy == null) {
+                char[] password = o.password;
+                boolean weak = !strong(o.password);
+                if (o.jks || weak) {
+                    // keep the certificate (clients that trust it keep working); protect it properly from now on
+                    password = configuredStrong ? configured : randomPassword();
+                    rewrap(ks, passFile, id, o.password, password, !configuredStrong);
+                    log.warn("wsapi TLS keystore " + ks + " was " + (o.jks ? "JKS" : "") + (o.jks && weak ? " and " : "")
+                            + (weak ? "protected by " + o.source : "") + "; re-saved as PKCS12 under "
+                            + (configuredStrong ? "wsapi_keystore_password" : "a random password in " + passFile)
+                            + ". Its certificate is unchanged (" + fingerprint(cert, "SHA-384") + ")");
                 }
-                ServedIdentity entry = servedIdentity(store, password, ks);
-                old = entry.cert;
-                replaceWhy = policyProblem(old);
-                if (replaceWhy == null && expired(old)) replaceWhy = "its certificate expired on " + old.getNotAfter().toInstant();
-                if (replaceWhy == null) {
-                    long days = Duration.between(Instant.now(), old.getNotAfter().toInstant()).toDays();
-                    if (days < 30) log.warn("wsapi TLS certificate expires in " + days + " days (" + old.getNotAfter().toInstant()
-                            + "); delete " + ks + " to make a new one, then re-pin clients");
-                    return new Material(entry.store, password, old, ks, false);
+                if (configured != null && !configuredStrong) {
+                    log.warn("wsapi_keystore_password is too weak to protect the keystore and is not used; remove it from the configuration");
                 }
-            } else {
-                // a keystore from an older wsapi: no password file, the old default password
-                old = legacyCertificate(ks);
-                replaceWhy = old == null
-                        ? "it was made by an older wsapi and does not open with the old default password"
-                        : "it was made by an older wsapi under the default password" + (policyProblem(old) == null ? "" : ", and " + policyProblem(old));
+                if (policy != null) {
+                    log.warn("wsapi TLS certificate " + fingerprint(cert, "SHA-384") + " is below the crypto policy: " + policy
+                            + ". It is kept so clients that trust it keep working. To replace it with a policy-strength certificate set "
+                            + "wsapi_tls_replace_noncompliant=true and restart, then give clients the new fingerprint from " + FINGERPRINT_FILE);
+                }
+                long days = Duration.between(Instant.now(), cert.getNotAfter().toInstant()).toDays();
+                if (days < 30) log.warn("wsapi TLS certificate expires in " + days + " days (" + cert.getNotAfter().toInstant()
+                        + "); delete " + ks + " to make a new one, then re-pin clients");
+                return new Material(id.store, password, cert, ks, false);
             }
-            log.warn("wsapi TLS keystore " + ks + " is replaced: " + replaceWhy
-                    + (old == null ? "" : " (old certificate " + fingerprint(old, "SHA-256") + ")"));
+            log.warn("wsapi TLS keystore " + ks + " is replaced: " + replaceWhy + " (old certificate " + fingerprint(cert, "SHA-384") + ")");
             try {
                 Files.delete(ks);
             } catch (IOException e) {
-                throw new Refused("cannot remove the non-compliant wsapi keystore " + ks + ": " + e.getMessage(), e);
+                throw new Refused("cannot remove the wsapi keystore " + ks + " to replace it: " + e.getMessage(), e);
             }
         }
 
-        if (password == null) {
-            password = randomPassword();
-            writeOwnerOnly(passFile, new String(password).getBytes(StandardCharsets.UTF_8));
+        char[] password;
+        if (configuredStrong) {
+            password = configured;
+        } else {
+            if (configured != null) {
+                log.warn("wsapi_keystore_password is too weak (fewer than " + MIN_CONFIGURED_PASSWORD_CHARS
+                        + " characters, or the old default) to protect a keystore; using a random password in " + passFile);
+            }
+            password = strong(filePassword) ? filePassword : randomPassword();
+            if (password != filePassword) writeOwnerOnly(passFile, new String(password).getBytes(StandardCharsets.UTF_8));
         }
         X509Certificate cert;
         KeyStore store;
@@ -271,20 +304,64 @@ public final class WsapiKeystore {
         return new Material(store, password, cert, ks, true);
     }
 
-    private static X509Certificate legacyCertificate(Path ks) {
-        for (String type : new String[]{"PKCS12", "JKS"}) {
+    /**
+     * Open an existing managed keystore with the first password that works: the configured one, the password file, then
+     * the old default (an older wsapi's store, or one whose re-save was interrupted). PKCS12 or (older wsapi) JKS.
+     */
+    private static Opened openExisting(Path ks, char[] configured, char[] filePassword, Path passFile) {
+        List<Object[]> candidates = new ArrayList<>();
+        if (configured != null) candidates.add(new Object[]{configured, "wsapi_keystore_password"});
+        if (filePassword != null) candidates.add(new Object[]{filePassword, passFile.toString()});
+        candidates.add(new Object[]{LEGACY_DEFAULT_PASSWORD.toCharArray(), "the old default password"});
+        boolean jks;
+        try (InputStream in = Files.newInputStream(ks)) {
+            byte[] head = new byte[4];
+            int n = in.read(head);
+            jks = n == 4 && (head[0] & 0xff) == 0xFE && (head[1] & 0xff) == 0xED && (head[2] & 0xff) == 0xFE && (head[3] & 0xff) == 0xED;
+            if (!jks && (n < 1 || head[0] != 0x30)) throw new Refused("the wsapi keystore " + ks + " is neither PKCS12 nor JKS");
+        } catch (IOException e) {
+            throw new Refused("cannot read the wsapi keystore " + ks + ": " + e.getMessage(), e);
+        }
+        List<String> tried = new ArrayList<>();
+        for (Object[] c : candidates) {
+            char[] pw = (char[]) c[0];
+            tried.add((String) c[1]);
             try (InputStream in = Files.newInputStream(ks)) {
-                KeyStore store = KeyStore.getInstance(type);
-                store.load(in, LEGACY_DEFAULT_PASSWORD.toCharArray());
-                for (Enumeration<String> a = store.aliases(); a.hasMoreElements(); ) {
-                    Certificate c = store.getCertificate(a.nextElement());
-                    if (c instanceof X509Certificate) return (X509Certificate) c;
-                }
-            } catch (Exception ignore) {
-                // try the next type
+                KeyStore store = KeyStore.getInstance(jks ? "JKS" : "PKCS12");
+                store.load(in, pw);
+                return new Opened(store, pw, (String) c[1], jks);
+            } catch (Exception wrong) {
+                // the next candidate
             }
         }
-        return null;
+        throw new Refused("the wsapi keystore " + ks + " does not open with " + String.join(", ", tried)
+                + "; it may have been replaced. Delete " + ks + " and " + passFile
+                + " to make a new one (clients must then trust the new fingerprint)");
+    }
+
+    /** Re-save a served identity as PKCS12 under {@code newPassword}; when {@code toFile}, that password goes to the password file. */
+    private static void rewrap(Path ks, Path passFile, ServedIdentity id, char[] oldPassword, char[] newPassword, boolean toFile) {
+        try {
+            Key k = id.store.getKey(ALIAS, oldPassword);
+            Certificate[] chain = id.store.getCertificateChain(ALIAS);
+            KeyStore fresh = KeyStore.getInstance("PKCS12");
+            fresh.load(null, null);
+            fresh.setKeyEntry(ALIAS, k, newPassword, chain);
+            id.store.deleteEntry(ALIAS);
+            id.store.setKeyEntry(ALIAS, k, newPassword, chain);       // the served copy, under the new password
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            fresh.store(bos, newPassword);
+            // the store first under a temporary name, then the password, then the store into place: if this stops
+            // half way the old store still opens (with the old default) and is re-saved again at the next start
+            Path tmp = ks.resolveSibling(ks.getFileName() + ".new");
+            writeOwnerOnly(tmp, bos.toByteArray());
+            if (toFile) writeOwnerOnly(passFile, new String(newPassword).getBytes(StandardCharsets.UTF_8));
+            move(tmp, ks);
+        } catch (Refused r) {
+            throw r;
+        } catch (Exception e) {
+            throw new Refused("could not re-save the wsapi keystore " + ks + ": " + e.getMessage(), e);
+        }
     }
 
     // ------------------------------------------------------------------ policy

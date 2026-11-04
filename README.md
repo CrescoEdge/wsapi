@@ -26,10 +26,14 @@ wsapi serves TLS 1.3/1.2 from a PKCS12 keystore in its plugin data directory
 At every start wsapi logs `wsapi TLS certificate fingerprint sha384:... (sha256:...)` and rewrites the two public files.
 The certificate stays the same across restarts, so pins keep working.
 
-A keystore from an older wsapi (RSA-2048 / `SHA256withRSA` under the default password `cresco`, or a JKS store) or an
-expired certificate is deleted and replaced at start, with a WARNING naming the old and new fingerprints. A keystore
-that its password file does not open is refused, and wsapi does not start: delete `ws.keystore` and
-`ws.keystore.pass` to make a new one, then re-pin clients.
+An existing keystore keeps loading and its certificate keeps being served, so clients that trust it keep working. A
+keystore from an older wsapi (JKS, or protected by the old default password `cresco` or a configured password under
+12 characters) is re-saved once as PKCS12 under a random password in `ws.keystore.pass`, with the same certificate
+(WARNING in the log). If the certificate is below the crypto policy (an older wsapi's RSA-2048 / `SHA256withRSA`),
+every start logs a WARNING; set `wsapi_tls_replace_noncompliant=true` to replace it with a policy-strength certificate,
+then give clients the new fingerprint. An expired certificate is replaced. Every replacement logs the old and new
+fingerprints. A keystore that none of its passwords opens is refused, and wsapi does not start: delete `ws.keystore`
+and `ws.keystore.pass` to make a new one, then re-pin clients.
 
 To serve a CA-issued certificate, set `wsapi_keystore_file` to a PKCS12 file and `wsapi_keystore_password` (or
 `wsapi_keystore_password_file`, an owner-only file) to its password. wsapi never modifies it, and refuses it if the key
@@ -80,10 +84,11 @@ the agent's tenant from the controller; until the controller knows it, every cli
 |---|---|---|
 | `wsapi_port` | 8282 | wss listen port |
 | `wsapi_keystore_file` | (managed keystore) | operator PKCS12 keystore |
-| `wsapi_keystore_password` / `_file` | (random, `ws.keystore.pass`) | keystore password; at least 12 characters |
+| `wsapi_keystore_password` / `_file` | (random, `ws.keystore.pass`) | keystore password; used only with at least 12 characters |
 | `wsapi_tls_key_type` | `EC` | `EC` (P-384) or `RSA` |
 | `wsapi_tls_rsa_bits` | 3072 | RSA size, at least 3072 |
 | `wsapi_tls_validity_days` | 730 | lifetime of a generated certificate |
+| `wsapi_tls_replace_noncompliant` | false | replace an existing certificate that is below the crypto policy |
 | `wsapi_tls_san` | | extra subject alternative names, comma-separated |
 | `wsapi_users_file` | `ws.users` in the plugin data directory | the credential file |
 | `cresco_service_key` / `_file` | | the legacy service key |
@@ -97,58 +102,15 @@ the agent's tenant from the controller; until the controller knows it, every cli
 
 ### Operator steps when upgrading
 
-1. Start the upgraded agent. wsapi replaces an old certificate (WARNING in the log) and writes `ws.crt.pem` and
-   `ws.fingerprint` in its plugin data directory.
-2. Give every client the fingerprint from `ws.fingerprint` (or the log line), or a copy of `ws.crt.pem`:
-   - Python (pycrescolib 1.3.3+): `clientlib(host, port, service_key, fingerprint="sha384:...")`, or
-     `ca_file="ws.crt.pem"`, or set `CRESCO_TLS_FINGERPRINT` / `CRESCO_TLS_CA_FILE` in the environment.
+1. Start the upgraded agent. wsapi keeps serving its existing certificate (re-saving an older keystore under a random
+   password, WARNING in the log) and writes `ws.crt.pem` and `ws.fingerprint` in its plugin data directory.
+2. Give every client the fingerprint from `ws.fingerprint` (or the log line), or a copy of `ws.crt.pem`; with it the
+   client verifies the certificate on every connection and sends nothing to a server that does not match:
+   - Python (pycrescolib): `clientlib(host, port, service_key, fingerprint="sha384:...")`, or `ca_file="ws.crt.pem"`, or
+     set `CRESCO_TLS_FINGERPRINT` / `CRESCO_TLS_CA_FILE` in the environment.
    - Java (clientlib): `CrescoClient.builder(host, port).serviceKey(key).pinnedFingerprint("sha384:...").build()`, or
      `.caFile(path)`, or `-Dcresco.client.tls.fingerprint=...` / `CRESCO_TLS_FINGERPRINT`.
-   Clients verify the certificate by default and refuse a server that does not match; nothing (no key, no password) is
-   sent to it.
-3. Optional: create per-user credentials with the `CredentialTool`, move clients to `user=` / `password=`, then set
-   `wsapi_service_key_enabled=false`.
-
-## Build
-
-```bash
-mvn package bundle:bundle
-```
-
-Built with **JDK 21**. The `bundle:bundle` goal is required: it rewrites the jar into a
-proper OSGi bundle (with `Bundle-SymbolicName`, `Export-Package`, and embedded
-dependencies). A plain `mvn package`/`install` produces a non-bundle jar that the agent
-cannot start. Output: `target/wsapi-1.3-SNAPSHOT.jar`.
-
-Requires `io.cresco:library` in your local Maven repository — build [library](https://github.com/CrescoEdge/library) first.
-
-## Cresco framework
-
-| Component | Role |
-|-----------|------|
-| [Agent](https://github.com/CrescoEdge/agent) | OSGi runtime that boots the framework and bundles every component into one executable jar. |
-| [Logger](https://github.com/CrescoEdge/logger) | Logging bundle (pax-logging) — the first service the agent starts. |
-| [Library](https://github.com/CrescoEdge/library) | Shared `io.cresco.library` API + embedded dependencies (JMS, Siddhi, Jackson, …) used by every component and plugin. |
-| [Core](https://github.com/CrescoEdge/core) | Core agent services (logging control, update management), loaded above the library. |
-| [Controller](https://github.com/CrescoEdge/controller) | Control plane — manages agents, regions and the global hierarchy; embeds the ActiveMQ broker, Derby state store, discovery, and loads system plugins. |
-| [Repo](https://github.com/CrescoEdge/repo) | Plugin repository — stores, reports and deploys Cresco plugins. |
-| [SysInfo](https://github.com/CrescoEdge/sysinfo) | Collects operating-environment and system metrics for an agent. |
-| **[WSAPI](https://github.com/CrescoEdge/wsapi)** — _this repo_ | WebSocket API plugin — the external client entrypoint (control, data plane, log streaming) over `wss://…:8282`. |
-| [STunnel](https://github.com/CrescoEdge/stunnel) | Secure TCP tunnel plugin (Netty) — tunnels TCP across the fabric. |
-| [Java Client (clientlib)](https://github.com/CrescoEdge/clientlib) | Java client library for driving Cresco through the wsapi. |
-| [Python Client (pycrescolib)](https://github.com/CrescoEdge/pycrescolib) | Python client library for driving Cresco through the wsapi. |
-
-## Observability
-
-Wired into Cresco's central metrics + health systems, consistent with every other plugin:
-
-- **Metrics** — `getmetrics` returns `MeasurementEngine` gauges (dataplane throughput / connection
-  counters); aggregated fabric-wide by the controller's `getmetricinventory`.
-- **Health** — registers a Felix `HealthCheck` (name `wsapi`, tag `local`) discovered by the
-  controller's `CrescoHealthExecutor`; reports `OK` with the wss listen port (registered only after
-  the Netty server binds) and surfaces in the health summary and the controller's
-  `gethealthinventory` action.
-
-## License
-
-Apache License, Version 2.0.
+3. Optional: set `wsapi_tls_replace_noncompliant=true` once to move an older certificate to the crypto policy's
+   algorithms, and give clients the new fingerprint.
+4. Optional: create per-user credentials with the `CredentialTool`, move clients to `user=` / `password=` (Python) or
+   `.credentials(user, password)` (Java), then set `wsapi_service_key_enabled=false`.
