@@ -131,25 +131,62 @@ class WsapiKeystoreTest {
     }
 
     @Test
-    void anOlderWsapisKeystoreIsReplacedCleanly(@TempDir Path dir) throws Exception {
+    void anOlderWsapisKeystoreStillLoadsWithItsCertificateAndIsReSavedUnderARandomPassword(@TempDir Path dir) throws Exception {
         for (String type : new String[]{"PKCS12", "JKS"}) {
             Path d = Files.createDirectories(dir.resolve(type));
-            X509Certificate old = legacyKeystore(d.resolve("ws.keystore"), type, 2048, "SHA256withRSA", "cresco".toCharArray(),
+            Path ks = d.resolve("ws.keystore");
+            X509Certificate old = legacyKeystore(ks, type, 2048, "SHA256withRSA", "cresco".toCharArray(),
                     Instant.now().plus(1000, ChronoUnit.DAYS));
             warnings.clear();
             WsapiKeystore.Material m = WsapiKeystore.loadOrCreate(settings(d), log);
-            assertTrue(m.generated, type);
-            assertNotEquals(old, m.certificate);
-            assertEquals("SHA384withECDSA", m.certificate.getSigAlgName());
-            assertTrue(warnings.stream().anyMatch(w -> w.contains("replaced") && w.contains(WsapiKeystore.fingerprint(old, "SHA-256"))), warnings.toString());
-            assertTrue(Files.exists(d.resolve("ws.keystore.pass")));
-            try (var s = Files.list(d)) {
-                assertEquals(List.of(), s.map(p -> p.getFileName().toString()).filter(n -> n.endsWith(".tmp") || n.contains("cresco")).toList(),
-                        "no temp files or leftover weakly-protected keys");
+            assertFalse(m.generated, type);
+            assertEquals(old, m.certificate, "the certificate clients already trust is kept");
+            assertTrue(warnings.stream().anyMatch(w -> w.contains("re-saved as PKCS12")), warnings.toString());
+            assertTrue(warnings.stream().anyMatch(w -> w.contains("below the crypto policy") && w.contains("RSA-2048")
+                    && w.contains("wsapi_tls_replace_noncompliant")), warnings.toString());
+
+            // now PKCS12 under the random owner-only password; the old default no longer opens it
+            String pw = Files.readString(d.resolve(WsapiKeystore.PASSWORD_FILE)).strip();
+            assertEquals("rw-------", perms(d.resolve(WsapiKeystore.PASSWORD_FILE)));
+            assertEquals("rw-------", perms(ks));
+            assertEquals(0x30, Files.readAllBytes(ks)[0], "PKCS12");
+            KeyStore p12 = KeyStore.getInstance("PKCS12");
+            try (var in = Files.newInputStream(ks)) { p12.load(in, pw.toCharArray()); }
+            assertEquals(old, p12.getCertificate("wsapi"));
+            assertTrue(p12.isKeyEntry("wsapi"));
+            KeyStore stale = KeyStore.getInstance("PKCS12");
+            assertThrows(Exception.class, () -> { try (var in = Files.newInputStream(ks)) { stale.load(in, "cresco".toCharArray()); } });
+            try (var st = Files.list(d)) {
+                assertEquals(List.of(), st.map(p -> p.getFileName().toString()).filter(n -> n.endsWith(".tmp") || n.endsWith(".new")).toList());
             }
-            // and the replacement is stable from then on
-            assertEquals(m.sha384, WsapiKeystore.loadOrCreate(settings(d), log).sha384);
+
+            // the next start loads it with the password file, the same certificate, nothing re-saved
+            warnings.clear();
+            WsapiKeystore.Material again = WsapiKeystore.loadOrCreate(settings(d), log);
+            assertEquals(m.sha384, again.sha384);
+            assertTrue(warnings.stream().noneMatch(w -> w.contains("re-saved")), warnings.toString());
+
+            // the operator opts in to a policy-strength replacement
+            warnings.clear();
+            WsapiKeystore.Material fresh = WsapiKeystore.loadOrCreate(settings(d).replaceNonCompliant(true), log);
+            assertTrue(fresh.generated);
+            assertEquals("SHA384withECDSA", fresh.certificate.getSigAlgName());
+            assertTrue(warnings.stream().anyMatch(w -> w.contains("replaced") && w.contains(m.sha384)), warnings.toString());
+            assertEquals(fresh.sha384, WsapiKeystore.loadOrCreate(settings(d), log).sha384);
         }
+    }
+
+    @Test
+    void aKeystoreUnderAWeakConfiguredPasswordStillLoadsAndIsReSaved(@TempDir Path dir) throws Exception {
+        X509Certificate old = legacyKeystore(dir.resolve("ws.keystore"), "PKCS12", 3072, "SHA384withRSA", "short".toCharArray(),
+                Instant.now().plus(100, ChronoUnit.DAYS));
+        WsapiKeystore.Material m = WsapiKeystore.loadOrCreate(settings(dir).configuredPassword("short".toCharArray()), log);
+        assertEquals(old, m.certificate);
+        assertTrue(Files.exists(dir.resolve(WsapiKeystore.PASSWORD_FILE)));
+        assertTrue(warnings.stream().anyMatch(w -> w.contains("too weak")), warnings.toString());
+        assertTrue(warnings.stream().noneMatch(w -> w.contains("below the crypto policy")), "RSA-3072 / SHA-384 meets the policy");
+        // the weak configured password no longer opens it; the password file does
+        assertEquals(m.sha384, WsapiKeystore.loadOrCreate(settings(dir).configuredPassword("short".toCharArray()), log).sha384);
     }
 
     @Test
@@ -180,9 +217,16 @@ class WsapiKeystoreTest {
     }
 
     @Test
-    void aWeakConfiguredPasswordIsRefused(@TempDir Path dir) {
-        assertThrows(WsapiKeystore.Refused.class, () -> WsapiKeystore.loadOrCreate(settings(dir).configuredPassword("cresco".toCharArray()), log));
-        assertThrows(WsapiKeystore.Refused.class, () -> WsapiKeystore.loadOrCreate(settings(dir).configuredPassword("short".toCharArray()), log));
+    void aWeakConfiguredPasswordNeverProtectsANewKeystore(@TempDir Path dir) throws Exception {
+        WsapiKeystore.Material m = WsapiKeystore.loadOrCreate(settings(dir).configuredPassword("cresco".toCharArray()), log);
+        assertTrue(m.generated);
+        assertNotEquals("cresco", new String(m.password));
+        assertEquals(new String(m.password), Files.readString(dir.resolve(WsapiKeystore.PASSWORD_FILE)).strip());
+        assertTrue(warnings.stream().anyMatch(w -> w.contains("too weak")));
+        Path d2 = Files.createDirectories(dir.resolve("strong"));
+        WsapiKeystore.Material s = WsapiKeystore.loadOrCreate(settings(d2).configuredPassword("a-strong-password-1".toCharArray()), log);
+        assertEquals("a-strong-password-1", new String(s.password));
+        assertFalse(Files.exists(d2.resolve(WsapiKeystore.PASSWORD_FILE)), "a strong configured password needs no password file");
     }
 
     @Test

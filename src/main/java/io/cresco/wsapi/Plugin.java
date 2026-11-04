@@ -214,6 +214,7 @@ public class Plugin implements PluginService {
                 .keyType(cfg.getStringParam("wsapi_tls_key_type", "EC"))
                 .rsaBits(cfg.getIntegerParam("wsapi_tls_rsa_bits", 3072))
                 .validityDays(cfg.getIntegerParam("wsapi_tls_validity_days", 730))
+                .replaceNonCompliant(cfg.getBooleanParam("wsapi_tls_replace_noncompliant", false))
                 .extraSans(sans)
                 .identity(pluginBuilder.getRegion(), pluginBuilder.getAgent(), pluginBuilder.getPluginID());
     }
