@@ -75,6 +75,9 @@ public class WsRouter extends SimpleChannelInboundHandler<FullHttpRequest> {
         private volatile int maxConnectionsAdmin = 256;
         private volatile java.util.Set<String> allowedOrigins = java.util.Set.of();
 
+        /** This server's log-stream configuration and undo pools; shut down with it. */
+        final LogStreamPools logStreams = new LogStreamPools();
+
         public Gate(Authenticator authenticator, ApiGateway gateway, int threads, int queue, CLogger logger) {
             this.authenticator = authenticator;
             this.gateway = gateway;
@@ -318,6 +321,7 @@ public class WsRouter extends SimpleChannelInboundHandler<FullHttpRequest> {
 
         public void shutdown() {
             pool.shutdownNow();
+            logStreams.shutdown();
             synchronized (this) {
                 stopped = true;
                 if (revoker != null) revoker.shutdownNow();

@@ -21,7 +21,9 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * A closed log stream's undo (setlogdp=false, a blocking RPC of up to 10 s) runs on wsapi's own bounded undo pool, also
- * while the configuration pool is full; it used to fall back to the JVM's common ForkJoin pool.
+ * while the configuration pool is full; it used to fall back to the JVM's common ForkJoin pool. The pools are the gate's
+ * own (one set per server), so tasks another test (or server) left queued cannot fill them: this test used to fail now and
+ * then when an earlier test had left the JVM-wide configuration pool's queue nearly full.
  */
 class LogStreamUndoPoolTest {
 
@@ -46,13 +48,15 @@ class LogStreamUndoPoolTest {
         EmbeddedChannel ch = new EmbeddedChannel(new LogStreamerWsHandler(plugin, ReviewApiDataplaneTest.principal("tenant-a", "alice", "admin"), gate));
         ch.writeInbound(new TextWebSocketFrame("region-1,agent-1,Info,io.cresco"));
         assertTrue(configured.await(10, TimeUnit.SECONDS), "control: configured (setlogdp=true, setloglevel)");
+        // this gate's own pools (one set per server): no other test's queued work is in them
+        LogStreamPools pools = gate.logStreams;
         long until = System.currentTimeMillis() + 5_000;
-        while (LogStreamerWsHandler.CONFIG_POOL.getActiveCount() > 0 && System.currentTimeMillis() < until) Thread.sleep(10);
+        while ((pools.config.getActiveCount() > 0 || !pools.config.getQueue().isEmpty()) && System.currentTimeMillis() < until) Thread.sleep(10);
 
         CountDownLatch release = new CountDownLatch(1);
         List<Runnable> blockers = new ArrayList<>();
         try {
-            int capacity = LogStreamerWsHandler.CONFIG_POOL.getMaximumPoolSize() + LogStreamerWsHandler.CONFIG_POOL.getQueue().remainingCapacity();
+            int capacity = pools.config.getMaximumPoolSize() - pools.config.getActiveCount() + pools.config.getQueue().remainingCapacity();
             for (int i = 0; i < capacity; i++) {
                 Runnable r = () -> {
                     try {
@@ -61,10 +65,10 @@ class LogStreamUndoPoolTest {
                         Thread.currentThread().interrupt();
                     }
                 };
-                LogStreamerWsHandler.CONFIG_POOL.execute(r);
+                pools.config.execute(r);
                 blockers.add(r);
             }
-            assertThrows(java.util.concurrent.RejectedExecutionException.class, () -> LogStreamerWsHandler.CONFIG_POOL.execute(() -> { }),
+            assertThrows(java.util.concurrent.RejectedExecutionException.class, () -> pools.config.execute(() -> { }),
                     "control: the configuration pool is full");
 
             ch.close();
@@ -75,8 +79,12 @@ class LogStreamUndoPoolTest {
         } finally {
             release.countDown();
         }
-        assertTrue(LogStreamerWsHandler.UNDO_POOL.getMaximumPoolSize() <= LogStreamerWsHandler.UNDO_THREADS
-                && LogStreamerWsHandler.UNDO_POOL.getQueue().remainingCapacity() + LogStreamerWsHandler.UNDO_POOL.getQueue().size()
-                == LogStreamerWsHandler.UNDO_QUEUE, "bounded");
+        assertTrue(pools.undo.getMaximumPoolSize() <= LogStreamPools.UNDO_THREADS
+                && pools.undo.getQueue().remainingCapacity() + pools.undo.getQueue().size() == LogStreamPools.UNDO_QUEUE, "bounded");
+        gate.shutdown();
+        assertTrue(pools.config.isShutdown() && pools.undo.isShutdown(), "the gate's pools stop with it");
+        WsRouter.Gate other = new WsRouter.Gate(auth, gw, 1, 4, plugin.getLogger("t", CLogger.Level.Info));
+        assertNotSame(pools, other.logStreams, "each server has its own pools");
+        other.shutdown();
     }
 }

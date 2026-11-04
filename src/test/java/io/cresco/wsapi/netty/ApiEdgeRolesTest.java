@@ -155,7 +155,7 @@ class ApiEdgeRolesTest {
         EmbeddedChannel admin = new EmbeddedChannel(new LogStreamerWsHandler(plugin, principal("tenant-a", "alice", "admin", List.of()),
                 ReviewApiDataplaneTest.gate(plugin, rpcs)));
         admin.writeInbound(new TextWebSocketFrame("region-1,agent-1,Info,io.cresco"));
-        // configuration runs off the event loop (LogStreamerWsHandler.CONFIG_POOL)
+        // configuration runs off the event loop (the gate's LogStreamPools.config)
         long until = System.currentTimeMillis() + 5_000;
         while (rpcs.size() < 2 && System.currentTimeMillis() < until) Thread.sleep(20);
         List<String> actions = new ArrayList<>();
