@@ -100,6 +100,12 @@ public final class PasswordHash {
 
     public int iterations() { return iterations; }
 
+    /** The same stored hash (iterations, salt and hash): false once the password was changed. */
+    boolean sameAs(PasswordHash other) {
+        return other != null && other.iterations == iterations && java.security.MessageDigest.isEqual(other.salt, salt)
+                && java.security.MessageDigest.isEqual(other.hash, hash);
+    }
+
     /** The stored form. */
     public String encode() {
         return SCHEME + "$" + iterations + "$" + Base64.getEncoder().encodeToString(salt) + "$" + Base64.getEncoder().encodeToString(hash);

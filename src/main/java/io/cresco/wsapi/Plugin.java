@@ -205,7 +205,10 @@ public class Plugin implements PluginService {
                         .limits(cfg.getIntegerParam("wsapi_auth_pending_per_source", 2),
                                 cfg.getIntegerParam("wsapi_max_connections_per_user", 64),
                                 cfg.getIntegerParam("wsapi_max_connections_per_admin", 256),
-                                origins);
+                                origins)
+                        // every open connection's credential is checked again this often: a revoked token, a removed
+                        // user, a changed password or role closes the connections it opened (1008)
+                        .revocationCheckMs(cfg.getLongParam("wsapi_revocation_check_ms", 1000L));
 
                 // --- Netty WebSocket server (replaces Jetty). One wss listener serves all three
                 //     endpoints; every upgrade authenticated; permessage-deflate off; whole-message frame aggregation. ---

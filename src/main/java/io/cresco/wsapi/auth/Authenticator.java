@@ -50,6 +50,8 @@ public final class Authenticator {
          * for a per-user credential.
          */
         public final String scope;
+        /** What it authenticated with, for {@link #revocation}; null for a principal not made by an Authenticator. */
+        final Credential credential;
 
         Principal(String tenant, String user, String role, boolean serviceKey) {
             this(tenant, user, role, serviceKey, List.of(), null);
@@ -60,12 +62,27 @@ public final class Authenticator {
         }
 
         Principal(String tenant, String user, String role, boolean serviceKey, List<String> grants, String scope) {
+            this(tenant, user, role, serviceKey, grants, scope, null);
+        }
+
+        Principal(String tenant, String user, String role, boolean serviceKey, List<String> grants, String scope, Credential credential) {
             this.tenant = tenant;
             this.user = user;
             this.role = role;
             this.serviceKey = serviceKey;
             this.grants = grants == null ? List.of() : List.copyOf(grants);
             this.scope = scope;
+            this.credential = credential;
+        }
+
+        /** How it authenticated, for the log: {@code password}, {@code API token <id>} or {@code service key}. */
+        public String credentialName() {
+            if (credential == null) return serviceKey ? "service key" : "credential";
+            switch (credential.kind) {
+                case TOKEN: return "API token " + credential.tokenId;
+                case SERVICE_KEY: return "service key";
+                default: return "password";
+            }
         }
 
         public boolean isAdmin() { return CredentialStore.ROLE_ADMIN.equals(role); }
@@ -107,6 +124,44 @@ public final class Authenticator {
         static Result ok(Principal p) { return new Result(0, p, null, null, 0, p.user); }
 
         static Result fail(int status, String client, String log, String user) { return new Result(status, null, client, log, 0, user); }
+    }
+
+    /**
+     * The credential a principal was accepted with, so an open connection can be checked again ({@link #revocation}):
+     * a password (its user's stored hash, tenant, role and grants as accepted), an API token (its id and stored hash, and
+     * its user as accepted), or the service key (an HMAC of the key under this process's random key, never the key).
+     */
+    static final class Credential {
+        enum Kind { PASSWORD, TOKEN, SERVICE_KEY }
+
+        final Kind kind;
+        final String user, tokenId, tokenSha384, keyMac;
+        final CredentialStore.Entry entry;
+        /** The last store this credential was found unchanged in (stores are immutable, replaced on every change). */
+        volatile CredentialStore checkedIn;
+
+        private Credential(Kind kind, String user, CredentialStore.Entry entry, String tokenId, String tokenSha384, String keyMac,
+                           CredentialStore store) {
+            this.kind = kind;
+            this.user = user;
+            this.entry = entry;
+            this.tokenId = tokenId;
+            this.tokenSha384 = tokenSha384;
+            this.keyMac = keyMac;
+            this.checkedIn = store;
+        }
+
+        static Credential password(CredentialStore s, CredentialStore.Entry e) {
+            return new Credential(Kind.PASSWORD, e.user, e, null, null, null, s);
+        }
+
+        static Credential token(CredentialStore s, CredentialStore.Token t, CredentialStore.Entry e) {
+            return new Credential(Kind.TOKEN, e.user, e, t.id, t.sha384, null, s);
+        }
+
+        static Credential serviceKey(String keyMac) {
+            return new Credential(Kind.SERVICE_KEY, CredentialStore.SERVICE_KEY_USER, null, null, null, keyMac, null);
+        }
     }
 
     public static final String SERVICE_KEY_HEADER = "cresco_service_key";
@@ -236,7 +291,7 @@ public final class Authenticator {
             }
             CredentialStore s = store.get();
             CredentialStore.Entry e = s.get(user);
-            if (e != null && rememberedOk(s, user, up[1])) return accept(e, source, tenant);
+            if (e != null && rememberedOk(s, user, up[1])) return accept(e, source, tenant, Credential.password(s, e));
             return null;                                         // a PBKDF2 check decides
         }
         if (serviceKeyHeader != null) return serviceKey(serviceKeyHeader, source, tenant);
@@ -259,7 +314,7 @@ public final class Authenticator {
         String why;
         if (valid && !t.expired(clock.getAsLong())) {
             CredentialStore.Entry e = s.get(t.user);
-            if (e != null) return accept(e, source, tenant);
+            if (e != null) return accept(e, source, tenant, Credential.token(s, t, e));
             why = "API token " + t.id + ": its user no longer exists";
         } else {
             why = !m.matches() ? "malformed API token" : t == null ? "unknown API token"
@@ -285,7 +340,7 @@ public final class Authenticator {
         }
         limiter.success(source, AuthRateLimiter.SERVICE_KEY);
         return Result.ok(new Principal(tenant, CredentialStore.SERVICE_KEY_USER, CredentialStore.ROLE_ADMIN, true, List.of(),
-                serviceKeyLimitsPerSource ? AuthRateLimiter.bucket(source) : null));
+                serviceKeyLimitsPerSource ? AuthRateLimiter.bucket(source) : null, Credential.serviceKey(keyMac(serviceKey.get()))));
     }
 
     private volatile boolean serviceKeyLimitsPerSource = true;
@@ -337,15 +392,15 @@ public final class Authenticator {
                         + weak + "); set a new one with CredentialTool passwd", user);
             }
             remember(s, user, up[1]);
-            return accept(e, source, agentTenantName);
+            return accept(e, source, agentTenantName, Credential.password(s, e));
         } finally {
             Arrays.fill(secret, '\0');
         }
     }
 
-    private Result accept(CredentialStore.Entry e, String source, String agentTenantName) {
+    private Result accept(CredentialStore.Entry e, String source, String agentTenantName, Credential credential) {
         limiter.success(source, e.user);
-        Principal p = new Principal(e.tenant, e.user, e.role, false, e.grants);
+        Principal p = new Principal(e.tenant, e.user, e.role, false, e.grants, null, credential);
         if (!p.tenant.equals(agentTenantName)) {
             boolean superAdmin = p.isAdmin() && superuserTenants.get().contains(p.tenant);
             if (!superAdmin) {
@@ -440,4 +495,95 @@ public final class Authenticator {
 
     /** Forget every remembered password (the store changed). */
     public void forgetVerified() { verified.clear(); }
+
+    /**
+     * Why an open connection of {@code p} must end now, or null while the credential it authenticated with would still
+     * be accepted, as the same caller. Checked for every message an API client sends and, for every open connection, at
+     * least once a second (WsRouter.Gate), so a revocation reaches connections that were opened before it:
+     * <ul>
+     *   <li>a password: its user was removed, its password changed, or its tenant, role or stream grants changed;</li>
+     *   <li>an API token: it was revoked (or replaced), it expired, or its user was removed or changed tenant, role or
+     *       stream grants (a password change does not end a token's connections: the token itself is still valid);</li>
+     *   <li>the service key: it was changed, disabled or found too weak;</li>
+     *   <li>any of them: a caller of another tenant that is no longer an admin of a superuser tenant.</li>
+     * </ul>
+     * A credential file that is refused (unreadable, not owner-only, malformed) is no store at all: no per-user credential
+     * passes, so their connections end too (fail closed), as new ones are refused. Costs no PBKDF2 and touches no limiter.
+     * A principal not made by an Authenticator (no credential) is never revoked here.
+     */
+    public String revocation(Principal p) {
+        if (p == null) return "no authenticated caller";
+        Credential c = p.credential;
+        if (c == null) return null;
+        String why;
+        if (c.kind == Credential.Kind.SERVICE_KEY) {
+            why = serviceKeyRevocation(c);
+        } else {
+            CredentialStore s = store.get();
+            if (s == null) s = CredentialStore.empty();
+            if (c.checkedIn == s) {
+                why = null;                                      // the same immutable store: nothing about it changed
+            } else {
+                why = c.kind == Credential.Kind.TOKEN ? tokenRevocation(c, s) : passwordRevocation(c, s);
+                if (why == null) c.checkedIn = s;
+            }
+            if (why == null && c.kind == Credential.Kind.TOKEN) {
+                CredentialStore.Token t = s.token(c.tokenId);
+                if (t != null && t.expired(clock.getAsLong())) why = "its API token " + c.tokenId + " has expired";
+            }
+        }
+        if (why != null) return why;
+        String agent = agentTenant.get();
+        if (agent != null && !agent.isEmpty() && !p.tenant.equals(agent)
+                && !(p.isAdmin() && superuserTenants.get().contains(p.tenant))) {
+            return p + " of tenant " + p.tenant + " is no longer an admin of a superuser tenant (broker_superuser_tenants)";
+        }
+        return null;
+    }
+
+    private static String passwordRevocation(Credential c, CredentialStore s) {
+        CredentialStore.Entry now = s.get(c.user);
+        if (now == null) return "user " + c.user + " was removed";
+        if (!now.hash.sameAs(c.entry.hash)) return "the password of " + c.user + " was changed";
+        return identityChange(c.entry, now);
+    }
+
+    private static String tokenRevocation(Credential c, CredentialStore s) {
+        CredentialStore.Entry now = s.get(c.user);
+        if (now == null) return "user " + c.user + " was removed";      // and its tokens with it
+        CredentialStore.Token t = s.token(c.tokenId);
+        if (t == null) return "its API token " + c.tokenId + " was revoked";
+        if (!t.sha384.equals(c.tokenSha384) || !t.user.equals(c.user)) return "its API token " + c.tokenId + " was replaced";
+        return identityChange(c.entry, now);
+    }
+
+    /** Why the user is no longer the caller it authenticated as (tenant, role, stream grants), or null. */
+    private static String identityChange(CredentialStore.Entry was, CredentialStore.Entry now) {
+        if (!now.tenant.equals(was.tenant)) return "the tenant of " + now.user + " changed";
+        if (!now.role.equals(was.role)) return "the role of " + now.user + " changed (" + was.role + " to " + now.role + ")";
+        if (!now.grants.equals(was.grants)) return "the stream grants of " + now.user + " changed";
+        return null;
+    }
+
+    private String serviceKeyRevocation(Credential c) {
+        String problem = serviceKeyProblem();
+        if (problem != null) return "the service key is no longer accepted: " + problem;
+        if (!MessageDigest.isEqual(c.keyMac.getBytes(StandardCharsets.US_ASCII), keyMac(serviceKey.get()).getBytes(StandardCharsets.US_ASCII))) {
+            return "the service key was changed";
+        }
+        return null;
+    }
+
+    /** The last service key seen and its HMAC, as one pair. */
+    private volatile String[] lastKeyMac;
+
+    /** An HMAC of the service key under this process's random key (cached for the last key seen), never the key itself. */
+    private String keyMac(String key) {
+        if (key == null) return "";
+        String[] last = lastKeyMac;
+        if (last != null && key.equals(last[0])) return last[1];
+        String m = rememberKey("\u0000service-key", key);
+        lastKeyMac = new String[]{key, m};
+        return m;
+    }
 }

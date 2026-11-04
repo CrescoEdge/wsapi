@@ -129,6 +129,28 @@ admin budget, so one busy tool could starve the others. wsapi never sends a `WWW
 than wsapi's own address or one in `wsapi_allowed_origins`, so a web page cannot open wsapi with a browser's cached
 credentials. Refusals are logged with the source, the user name and the reason; secrets never are.
 
+**Revocation reaches open connections.** A connection lives only while the credential it authenticated with would
+still be accepted, as the same caller. Every open API, dataplane and log-stream connection is checked again every
+`wsapi_revocation_check_ms` (1 s; 250 ms to 5 s), and every message a client sends is checked before it is served, so
+within about 2 s of a change to the credential file (wsapi re-reads it within a second):
+- `token revoke` closes every connection opened with that token, and an expired token's connections close when it expires;
+- `remove` closes every connection of that user, its tokens' included;
+- `passwd` closes the user's password connections (its tokens are separate credentials and keep theirs; revoke them too
+  if the password leaked);
+- a changed role, tenant or stream grants (`grant`, `revoke`, or an edit) closes every connection of that user, password
+  and token alike, so the client reconnects with its new rights;
+- a changed or disabled service key closes the service key's connections, and a caller of another tenant whose tenant is
+  no longer in `broker_superuser_tenants` loses its connections too.
+
+The client sees WebSocket close 1008 `credentials revoked or changed: authenticate again`; both clients then reconnect,
+and a revoked credential's reconnect is refused (401) like any new connection. A reply to an RPC that was in flight is
+not delivered after the revocation. The log says which caller lost how many connections and why (`wsapi closed N open
+connection(s) of api:<tenant>/<user>[role] (API token <id>): its API token <id> was revoked`), and
+`wsapi.auth.revoked.connections` counts them. A credential file that is refused (unreadable, not owner-only, malformed)
+lets no per-user credential in, so it also closes their open connections until it is fixed (fail closed): change it
+with `CredentialTool`, which replaces it atomically. Authentication used to happen only at the upgrade, so a leaked token
+on a long-lived connection (GaiaKeep's tooling holds its connections open) kept working after it was revoked.
+
 **API requests.** A caller has at most `wsapi_rpc_max_inflight_user` (8) or `wsapi_rpc_max_inflight_admin` (32) RPCs in
 flight across its connections; more are answered at once with status `429` (busy), and a full pool with `503`; an RPC
 never runs on a network thread. A `user` asks for at most `wsapi_rpc_max_timeout_user_ms` (120 s) per RPC, an admin up
@@ -180,6 +202,7 @@ the agent's tenant from the controller; until the controller knows it, every cli
 | `wsapi_auth_window_seconds` | 60 | the counting window |
 | `wsapi_auth_lockout_seconds` / `wsapi_auth_max_lockout_seconds` | 60 / 900 | first lockout, and the cap of the doubling |
 | `wsapi_auth_cache_seconds` | 300 | how long a verified password is remembered; 0 turns it off |
+| `wsapi_revocation_check_ms` | 1000 | how often every open connection's credential is checked again (250 to 5000) |
 | `wsapi_auth_threads` / `wsapi_auth_queue` | cores/2 (2-8) / 256 | authentication workers; a full queue answers 503 |
 | `wsapi_auth_pending_per_source` | 2 | password checks one source may have waiting for the PBKDF2 pool |
 | `wsapi_max_connections_per_user` / `wsapi_max_connections_per_admin` | 64 / 256 | open connections per caller |

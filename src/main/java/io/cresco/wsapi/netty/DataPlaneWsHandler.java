@@ -108,6 +108,9 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
 
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, WebSocketFrame frame) {
+        // a credential revoked or changed since the upgrade: nothing more is published, the connection is being closed
+        // (what it receives stops when the gate's check closes it, within wsapi_revocation_check_ms)
+        if (gate != null && !gate.admit(ctx.channel(), principal)) return;
         try {
             if (frame instanceof TextWebSocketFrame) {
                 String message = ((TextWebSocketFrame) frame).text();

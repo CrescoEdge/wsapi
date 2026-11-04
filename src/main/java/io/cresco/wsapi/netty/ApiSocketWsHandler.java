@@ -150,6 +150,8 @@ public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFra
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, WebSocketFrame frame) {
         if (!(frame instanceof TextWebSocketFrame)) return;
+        // a credential revoked or changed since the upgrade: nothing more is served, the connection is being closed
+        if (gate != null && !gate.admit(ctx.channel(), principal)) return;
         try {
             String message = ((TextWebSocketFrame) frame).text();
             Map<String, Map<String, String>> incoming = gson.fromJson(message, TYPE);
@@ -200,6 +202,8 @@ public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFra
                     } finally {
                         mine.decrementAndGet();
                     }
+                    // revoked while the RPC ran: its reply is not given to the revoked credential
+                    if (!gate.admit(ctx.channel(), principal)) return;
                     ctx.writeAndFlush(new TextWebSocketFrame(r));
                 };
                 try {
