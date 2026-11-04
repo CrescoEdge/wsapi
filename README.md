@@ -72,7 +72,8 @@ java -cp wsapi.jar io.cresco.wsapi.auth.CredentialTool revoke <ws.users> <user> 
 java -cp wsapi.jar io.cresco.wsapi.auth.CredentialTool list   <ws.users>
 ```
 
-Failed attempts are limited without letting the limits be turned against real users. A *source* is a bucket and an
+Failed attempts are limited so that strangers can slow real users at most, never lock them out, except where they share
+the user's network (the limit below). A *source* is a bucket and an
 exact address: the bucket is an IPv4 address or an IPv6 prefix (a /64 by default, `wsapi_auth_ipv6_prefix_bits`; set
 128 where one /64 is shared by unrelated clients, e.g. at a hosting provider). An IPv4 client behind NAT64 (64:ff9b::/96,
 64:ff9b:1::/96) or IPv4-mapped is its IPv4 address, not one /64 shared by every IPv4 client of the NAT64.
@@ -87,23 +88,37 @@ exact address: the bucket is an IPv4 address or an IPv6 prefix (a /64 by default
   up to 15 min (exact known-good addresses excepted); a malformed header counts here only. A user's success forgives
   only that user's own failures there.
 - **Per (user, address)**, growing delays after 3 free failures (1 s, 2 s, 4 s, ... up to 15 min) for that address only.
-- **A user's unknown sources: fair shares, then delays, never a lockout.** Each *share source* (an IPv4 /24,
+- **A user's unknown sources: fair shares, then delays.** Each *share source* (an IPv4 /24,
   `wsapi_auth_share_ipv4_prefix_bits`; the IPv6 bucket) gets its own fair share of the user's budget of
   `wsapi_auth_max_user_failures` (50) checks per minute: while N share sources are failing for that user in the
   window, one is checked while its own failures plus one are at most 50 / N, and all of them together at most 100.
   One stranger's sources never use up another source's share, so a stranger guessing from one network never slows
   the real user at another. Beyond its share a source is delayed, not refused: its next check comes after
   `wsapi_auth_delayed_check_seconds` (30 s), doubling with each failed delayed check up to 15 min, and a success resets
-  it. So no set of strangers keeps a user out: at worst, the first login from a new place waits 30 s.
+  it. So strangers on **other** networks can only slow a user's password login from a new place (at worst to one check
+  per 30 s), never stop it.
   **The bound:** one user's password gets at most 100 fair-share checks a minute (144,000 a day) plus about 100
   delayed checks a day for each distinct /24 (or IPv6 bucket) a guesser uses; with 10,000 networks, about 1.1 million
   guesses a day. The password policy below puts a password out of that reach: at 60 bits, half the space is 5.8 x 10^17
   guesses, more than a billion years at that rate.
+- **The limit: someone sharing your network.** An attacker on the same network as a user (the same IPv4 address behind a
+  NAT, or the same IPv6 /64, e.g. one LAN or one carrier-grade NAT) can keep delaying that user's **password** logins
+  from addresses not yet known good there (a new device, today's IPv6 privacy address), for as long as it keeps sending
+  wrong passwords for that user: by address the attacker and the user cannot be told apart. The user's exact known-good
+  addresses are not affected, and neither are API tokens. Use **API tokens** (never throttled per user, accepted from
+  any address) for tools and automation, and for people who log in from shared networks (a NAT, a campus, a hosting
+  provider; or set `wsapi_auth_ipv6_prefix_bits=128` where one /64 is shared by unrelated clients).
 - **Passwords** must have at least 12 characters, 6 different ones and about 60 bits (estimated from length and
   character classes), and may not be a well-known password (or a well-known word with a few digits around it), the user
   name, or a run like `abcdefghijkl`. `CredentialTool` refuses others; at login a password that does not meet the policy
   (one set before it, or written into the file by hand) is refused with that reason in the log, until it is changed
-  with `CredentialTool passwd`.
+  with `CredentialTool passwd`. The checks see through how characters look: the password is NFKC-normalised
+  (full-width and mathematical letters become ASCII), accents are dropped, and letters that look like ASCII ones
+  (Cyrillic `а с е о р х`, Greek `α ο ρ`, ...) are compared as those, so `раsswоrd1234` with Cyrillic letters is the
+  well-known `password1234`. Outside ASCII the strength estimate is conservative: a letter of any script counts as one of
+  26 letters of its case, any other character as one of 33 symbols (it used to count as one of 100, so `абвгдеабвгде`
+  passed where `abcdefabcdef` did not). A non-ASCII password accepted before may now be refused at login, with the reason
+  in the log; set a new one with `CredentialTool passwd`.
 - **API tokens, for tools.** `CredentialTool token add <ws.users> <user> [--expires-days N] [--label L]` prints a token
   `cwt1_<id>.<secret>` (256 random bits) once; only its SHA-384 is stored (a `+token:` line of the credential file).
   Clients send it as `Authorization: Bearer <token>` (pycrescolib `token=`, clientlib `Credentials.token(...)`, or
