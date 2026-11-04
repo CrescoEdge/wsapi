@@ -103,8 +103,9 @@ exact address: the bucket is an IPv4 address or an IPv6 prefix (a /64 by default
   per 30 s), never stop it.
   **The bound:** one user's password gets at most 100 fair-share checks a minute (144,000 a day) plus about 100
   delayed checks a day for each distinct /24 (or IPv6 bucket) a guesser uses; with 10,000 networks, about 1.1 million
-  guesses a day. The password policy below puts a password out of that reach: at 60 bits, half the space is 5.8 x 10^17
-  guesses, more than a billion years at that rate.
+  guesses a day. The password policy below enforces a minimum length, a minimum number of different characters and an
+  estimated strength of about 60 bits (from length and character classes), and refuses a short list of well-known
+  passwords; it does not recognise every common password.
 - **The limit: someone sharing your network.** An attacker on the same network as a user (the same IPv4 address behind a
   NAT, or the same IPv6 /64, e.g. one LAN or one carrier-grade NAT) can keep delaying that user's **password** logins
   from addresses not yet known good there (a new device, today's IPv6 privacy address), for as long as it keeps sending
