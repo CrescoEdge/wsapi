@@ -78,4 +78,42 @@ public final class TestSupport {
                 });
         return new PluginBuilder(as, "io.cresco.wsapi.Plugin", null, config);
     }
+
+    /**
+     * Start a server made by {@code make} (on port 0) whose port, reached as {@code localhost}, really is it: the server
+     * binds every interface, and the OS may give it a port number another process (an IDE helper, say) already listens on
+     * at 127.0.0.1 only, which then answers {@code localhost} instead ("Unrecognized SSL message, plaintext connection").
+     * Such a server is stopped and another one started.
+     */
+    public static io.cresco.wsapi.netty.NettyWsServer startReachable(java.util.function.Supplier<io.cresco.wsapi.netty.NettyWsServer> make,
+                                                                     java.security.cert.X509Certificate cert) throws Exception {
+        for (int attempt = 0; attempt < 5; attempt++) {
+            io.cresco.wsapi.netty.NettyWsServer s = make.get();
+            s.start();
+            if (presents("localhost", s.boundPort(), cert)) return s;
+            s.stop();
+        }
+        throw new IllegalStateException("no port where localhost reaches the test server");
+    }
+
+    /** Does {@code host:port} answer a TLS handshake with {@code cert}? */
+    static boolean presents(String host, int port, java.security.cert.X509Certificate cert) {
+        try {
+            javax.net.ssl.SSLContext ctx = javax.net.ssl.SSLContext.getInstance("TLS");
+            ctx.init(null, new javax.net.ssl.TrustManager[]{new javax.net.ssl.X509TrustManager() {
+                @Override public void checkClientTrusted(java.security.cert.X509Certificate[] c, String a) { }
+                @Override public void checkServerTrusted(java.security.cert.X509Certificate[] c, String a) { }
+                @Override public java.security.cert.X509Certificate[] getAcceptedIssuers() { return new java.security.cert.X509Certificate[0]; }
+            }}, null);
+            try (javax.net.ssl.SSLSocket sock = (javax.net.ssl.SSLSocket) ctx.getSocketFactory().createSocket()) {
+                sock.connect(new java.net.InetSocketAddress(host, port), 5_000);
+                sock.setSoTimeout(5_000);
+                sock.startHandshake();
+                java.security.cert.Certificate[] peer = sock.getSession().getPeerCertificates();
+                return peer.length > 0 && peer[0].equals(cert);
+            }
+        } catch (Exception notOurs) {
+            return false;
+        }
+    }
 }

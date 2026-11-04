@@ -132,9 +132,8 @@ class ProductionProfileTest {
                 return msg;
             }
         };
-        WsRouter.Gate gate = new WsRouter.Gate(auth, gw, 2, 16, TestSupport.logger(log)).revocationCheckMs(250);
-        server = new NettyWsServer(plugin, 0, tls.keyStore, tls.password, 64 * 1024, gate);
-        server.start();
+        server = TestSupport.startReachable(() -> new NettyWsServer(plugin, 0, tls.keyStore, tls.password, 64 * 1024,
+                new WsRouter.Gate(auth, gw, 2, 16, TestSupport.logger(log)).revocationCheckMs(250)), tls.certificate);
     }
 
     @AfterEach
