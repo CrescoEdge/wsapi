@@ -246,31 +246,29 @@ public final class Authenticator {
 
     /**
      * An API token ({@code Authorization: Bearer cwt1_<id>.<secret>}): checked on the network thread (one SHA-384, no
-     * PBKDF2), limited per source only, never per user: 256 bits cannot be guessed, so a tool that uses a token is never
-     * delayed by strangers guessing its user's password.
+     * PBKDF2). A valid, unexpired token of an existing user is always accepted, never refused by the limiter: 256 bits
+     * cannot be guessed, so neither strangers guessing its user's password nor a guesser behind the same address (a NAT)
+     * can lock a tool out. Wrong and expired tokens count against their source, and a locked source's wrong tokens are
+     * answered 429.
      */
     private Result token(String presented, String source, String tenant) {
-        long wait = limiter.retryAfterMs(source, null);
-        if (wait > 0) return limited(wait, null);
         java.util.regex.Matcher m = CredentialStore.Token.FORM.matcher(presented);
-        if (!m.matches()) {
-            limiter.failure(source, null);
-            return Result.fail(401, "authentication failed", "malformed API token", null);
-        }
         CredentialStore s = store.get();
-        CredentialStore.Token t = s.token(m.group(1));
-        if (t == null || !t.matches(presented)) {
-            limiter.failure(source, null);
-            return Result.fail(401, "authentication failed", t == null ? "unknown API token" : "wrong API token " + t.id,
-                    t == null ? null : t.user);
+        CredentialStore.Token t = m.matches() ? s.token(m.group(1)) : null;
+        boolean valid = t != null && t.matches(presented);
+        String why;
+        if (valid && !t.expired(clock.getAsLong())) {
+            CredentialStore.Entry e = s.get(t.user);
+            if (e != null) return accept(e, source, tenant);
+            why = "API token " + t.id + ": its user no longer exists";
+        } else {
+            why = !m.matches() ? "malformed API token" : t == null ? "unknown API token"
+                    : !valid ? "wrong API token " + t.id : "API token " + t.id + " has expired";
         }
-        if (t.expired(clock.getAsLong())) {
-            limiter.failure(source, null);
-            return Result.fail(401, "authentication failed", "API token " + t.id + " has expired", t.user);
-        }
-        CredentialStore.Entry e = s.get(t.user);
-        if (e == null) return Result.fail(401, "authentication failed", "API token " + t.id + ": its user no longer exists", t.user);
-        return accept(e, source, tenant);
+        long wait = limiter.retryAfterMs(source, null);
+        if (wait > 0) return limited(wait, t == null ? null : t.user);
+        limiter.failure(source, null);
+        return Result.fail(401, "authentication failed", why, t == null ? null : t.user);
     }
 
     private Result serviceKey(String provided, String source, String tenant) {
