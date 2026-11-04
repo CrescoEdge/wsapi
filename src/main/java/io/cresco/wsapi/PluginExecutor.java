@@ -14,7 +14,7 @@ import io.cresco.wsapi.netty.DataPlaneWsHandler;
         routingParams = {"region", "agent", "pluginid"},
         summary = "WebSocket API gateway: external clients connect over wss for control-plane RPC and dataplane streaming; exposes global location, live buffer tuning, and dataplane metrics.")
 @CrescoActions({
-    @CrescoAction(name = "nettuning", type = "CONFIG",
+    @CrescoAction(name = "nettuning", type = "CONFIG", roles = {"infra", "admin"},
         summary = "Apply fabric-wide network tuning (socket buffer / read-chunk / write-high-water) to the live Netty WebSocket server.",
         why = "Pushed by the controller AutoTuner to adapt the wss server's I/O sizing under load; new connections pick up the values.",
         returns = @CrescoReturn(name = "status", description = "10 on success")),

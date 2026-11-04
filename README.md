@@ -68,8 +68,13 @@ is remembered for `wsapi_auth_cache_seconds` (an HMAC under a per-process random
 that open several sockets do not pay PBKDF2 for each. Refusals are logged with the source address, the user name and
 the reason; secrets never are.
 
-wsapi removes the reserved caller parameters (`cresco_caller`, `cresco_caller_tenant`, `cresco_caller_roles`) from
-what a client sends, so a client cannot forge a caller.
+Every message an API client causes (API socket requests and log-stream configuration) is sent on behalf of that
+client (`PluginBuilder.msgOutOnBehalfOf`): the controller stamps the verified caller `api:<tenant>/<user>` with the
+client's role, and every receiver authorizes the action against it (`@CrescoAction(roles=...)`, see the controller's
+`docs/caller-authorization.md`). wsapi removes the reserved caller parameters (`cresco_caller`,
+`cresco_caller_tenant`, `cresco_caller_roles`) from what a client sends, so a client cannot forge a caller. wsapi takes
+the agent's tenant from the controller; until the controller knows it, every client is refused (503). wsapi's own
+`nettuning` action requires `infra` or `admin`.
 
 | Config key | Default | Meaning |
 |---|---|---|
