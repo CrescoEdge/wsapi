@@ -4,6 +4,7 @@ import com.google.common.reflect.TypeToken;
 import com.google.gson.Gson;
 import io.cresco.library.messaging.MsgEvent;
 import io.cresco.library.plugin.PluginBuilder;
+import io.cresco.library.security.Caller;
 import io.cresco.library.security.TenantNamespace;
 import io.cresco.library.utilities.CLogger;
 import io.cresco.wsapi.auth.Authenticator;
@@ -53,7 +54,7 @@ public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFra
             new ThreadPoolExecutor.CallerRunsPolicy());
 
     /** Parameters only the controller may set (the verified caller); a client's values are dropped. */
-    static final Set<String> RESERVED_PARAMS = Set.of("cresco_caller", "cresco_caller_tenant", "cresco_caller_roles");
+    static final Set<String> RESERVED_PARAMS = Caller.RESERVED_PARAMS;
 
     private final PluginBuilder plugin;
     private final CLogger logger;
@@ -114,6 +115,10 @@ public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFra
                         r = (response == null) ? failure(payload, "504", "no reply within "
                                 + (timeoutMs > 0 ? timeoutMs : DEFAULT_RPC_TIMEOUT_MS) + " ms; the operation may still complete")
                                 : success(response);
+                    } catch (SecurityException refused) {
+                        // the controller would not send it for this caller (on_behalf_bundles), so nothing was sent
+                        logger.error("ApiSocketWsHandler rpc refused for " + principal + ": " + refused.getMessage());
+                        r = failure(payload, "403", "unauthorized: " + refused.getMessage());
                     } catch (Exception ex) {
                         logger.error("ApiSocketWsHandler rpc: " + ex.getMessage());
                         r = failure(payload, "500", "rpc failed: " + ex.getMessage());

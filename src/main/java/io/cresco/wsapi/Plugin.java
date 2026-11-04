@@ -12,7 +12,7 @@ import io.cresco.wsapi.auth.Authenticator;
 import io.cresco.wsapi.auth.CredentialFile;
 import io.cresco.wsapi.netty.ApiGateway;
 import io.cresco.wsapi.netty.NettyWsServer;
-import io.cresco.wsapi.netty.PluginGateway;
+import io.cresco.wsapi.netty.OnBehalfGateway;
 import io.cresco.wsapi.netty.WsRouter;
 import io.cresco.wsapi.tls.WsapiKeystore;
 
@@ -30,7 +30,6 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Dictionary;
-import java.util.HashSet;
 import java.util.Hashtable;
 import java.util.List;
 import java.util.Map;
@@ -219,23 +218,28 @@ public class Plugin implements PluginService {
                 .identity(pluginBuilder.getRegion(), pluginBuilder.getAgent(), pluginBuilder.getPluginID());
     }
 
-    /** How API clients' messages are sent (for the authenticated client). */
+    /** API clients' messages go out on behalf of the authenticated client (the controller stamps api:<tenant>/<user>). */
     private ApiGateway apiGateway() {
-        return new PluginGateway(pluginBuilder);
+        return new OnBehalfGateway(pluginBuilder);
     }
 
-    /** This agent's tenant ({@code tenant_id}, as the controller reads it). */
+    /** This agent's tenant, from the controller; null while unknown, and wsapi then refuses every client (fail closed). */
     private String agentTenant() {
-        return pluginBuilder.getConfig().getStringParam("tenant_id", "default");
+        try {
+            return pluginBuilder.getAgentService().getTenant();
+        } catch (RuntimeException e) {
+            return null;
+        }
     }
 
-    /** The superuser tenants ({@code broker_superuser_tenants}). */
+    /** The superuser tenants ({@code broker_superuser_tenants}), from the controller. */
     private Set<String> superuserTenants() {
-        String csv = pluginBuilder.getConfig().getStringParam("broker_superuser_tenants");
-        if (csv == null || csv.isBlank()) return Collections.emptySet();
-        Set<String> out = new HashSet<>();
-        for (String t : csv.split(",")) if (!t.isBlank()) out.add(t.trim());
-        return out;
+        try {
+            Set<String> s = pluginBuilder.getAgentService().getSuperuserTenants();
+            return s == null ? Collections.emptySet() : s;
+        } catch (RuntimeException e) {
+            return Collections.emptySet();
+        }
     }
 
     /** Register wsapi's Felix HealthCheck so CrescoHealthExecutor discovers it. Best-effort. */

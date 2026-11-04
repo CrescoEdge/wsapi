@@ -33,6 +33,16 @@ public final class TestSupport {
     }
 
     public static PluginBuilder pluginBuilder(Path agentDataDir, Map<String, Object> config, List<String> log) {
+        return pluginBuilder(agentDataDir, config, log, null, null);
+    }
+
+    /**
+     * @param onBehalf receives {@code [pluginId, msg, caller]} for every msgOutOnBehalfOf; null keeps the library default
+     *                 (the controller refuses with SecurityException)
+     * @param tenant   what AgentService.getTenant answers
+     */
+    public static PluginBuilder pluginBuilder(Path agentDataDir, Map<String, Object> config, List<String> log,
+                                              java.util.function.Consumer<Object[]> onBehalf, String tenant) {
         CLogger logger = logger(log);
         ControllerState cs = (ControllerState) Proxy.newProxyInstance(ControllerState.class.getClassLoader(),
                 new Class[]{ControllerState.class}, (proxy, m, args) -> {
@@ -52,6 +62,12 @@ public final class TestSupport {
                         case "getAgentState": return state;
                         case "getCLogger": return logger;
                         case "getAgentDataDirectory": return agentDataDir.toString();
+                        case "getTenant": return tenant;
+                        case "getSuperuserTenants": return java.util.Set.of("ops");
+                        case "msgOutOnBehalfOf":
+                            if (onBehalf == null) return InvocationHandler.invokeDefault(proxy, m, args);
+                            onBehalf.accept(args);
+                            return null;
                         case "toString": return "TestAgentService";
                         case "hashCode": return 1;
                         case "equals": return proxy == args[0];
