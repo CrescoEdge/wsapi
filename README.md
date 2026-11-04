@@ -156,8 +156,13 @@ A message over its endpoint's cap, in one frame or in fragments, closes the conn
 - **A `user` sees only its own streams and streams granted to it.** Its streams are named `u:<user>:...` (ident_key
   `stream_name`); `CredentialTool grant` adds others (an exact name, or a prefix ending in `*`). A raw subscription must
   anchor `stream_name = '<such a stream>'`, so a user cannot subscribe to another caller's transfers or a process's
-  output (`seq_num='0'`, `type='output'`, ...). A user never writes a process's stdin (`type=input*`) and writes
-  `type=output` only on its own streams. Admins and the service key are not limited by ownership.
+  output (`seq_num='0'`, `type='output'`, ...). A user writes `type=output` only on its own streams. Admins and the
+  service key are not limited by ownership.
+- **No stdin on the dataplane.** The executor takes a process's stdin only from its `write_stdin` action (a MsgEvent,
+  accepted from the caller that started the runner, an admin or infra; the clients' `executor.write_stdin`). A
+  handshake that would write stdin (`io_type_key=type` with `input_id` `input` or `input-*`) is refused for every
+  caller, admins included, with that reason (`status_code=9`). It used to be accepted from admins, and the hardened
+  executor would silently drop what it carried.
 - **Reserved properties.** No client may name a property infrastructure writes as its `ident_key` or `io_type_key`:
   `cresco_*`, `transfer_*`, `seq_num`, `offset`, `total_bytes`, `sha384`, `start_byte`, `byte_length`, `dp_bytes`,
   `region_id`, `agent_id`, `plugin_id`, `pluginname`, `event`, `loglevel`, `logid`, `session_id`. Everything a client
@@ -165,10 +170,8 @@ A message over its endpoint's cap, in one frame or in fragments, closes the conn
 - A refused handshake answers `status_code=9` with the reason; the next text frame is a new handshake, and the third
   refusal closes the connection.
 - **A subscriber never receives a process's stdin.** Every subscription wsapi makes is the client's selector narrowed
-  by `(type IS NULL OR (type <> 'input' AND type NOT LIKE 'input-%'))`: the executor takes stdin only from messages of
-  its runner's unguessable `type` `input-<hex>` (or the development-only `input`), and a subscriber of the stream
-  would otherwise read what others type into a process, and learn the type that lets it type too. Writing stdin
-  through wsapi is unchanged (open the stream with `input_id=<stdin_type>`).
+  by `(type IS NULL OR (type <> 'input' AND type NOT LIKE 'input-%'))`, so no stdin frame an older executor or another
+  publisher puts on the dataplane reaches a client.
 - **Map events arrive as JSON text frames.** A dataplane `MapMessage` (for example the executor's `execution_log`,
   with the exit code, and `delete_exchange` when a process ends) reaches the client as a text frame with the JSON
   object of its entries (bytes as base64). wsapi used to drop them.
