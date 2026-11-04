@@ -108,8 +108,9 @@ exact address: the bucket is an IPv4 address or an IPv6 prefix (a /64 by default
   `cwt1_<id>.<secret>` (256 random bits) once; only its SHA-384 is stored (a `+token:` line of the credential file).
   Clients send it as `Authorization: Bearer <token>` (pycrescolib `token=`, clientlib `Credentials.token(...)`, or
   `CRESCO_API_TOKEN`). A token acts as its user (tenant, role, grants), may expire, and is revoked with
-  `token revoke`; removing a user removes its tokens. It cannot be guessed, so it is limited per source only, never
-  per user: a tool with a token is never delayed or locked out by strangers guessing its user's password. **Tools
+  `token revoke`; removing a user removes its tokens. It cannot be guessed, so a valid token is always accepted: never
+  delayed or locked out by strangers guessing its user's password, nor by a guesser behind the tool's own address.
+  Wrong and expired tokens count against their source (and are answered 429 while it is locked). **Tools
   and automation (GaiaKeep included) should use tokens**, not passwords or the shared service key.
 - **The service key** (at least 128 bits; weaker keys are refused) is limited per bucket and per address, never by a
   fabric-wide gate. Wrong keys are a metric (`wsapi.auth.servicekey.failures`) and, at 30 or more within a window from

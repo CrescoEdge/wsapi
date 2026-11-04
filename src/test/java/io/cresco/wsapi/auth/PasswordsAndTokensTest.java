@@ -99,6 +99,11 @@ class PasswordsAndTokensTest {
         assertTrue(r.ok(), "alice's tool, from a new host, with its token: HTTP " + r.status + " " + r.logReason);
         assertEquals("alice", r.principal.user);
 
+        // a password guesser behind the tool's own address (a NAT) locks that address for passwords, never the token
+        for (int i = 0; i < 20; i++) a.authenticate(PasswordHashTestSupport.basic("user" + i, "nat-guess-" + i), null, "192.0.2.200");
+        assertEquals(429, a.authenticate(PasswordHashTestSupport.basic("bob", "whatever-password-1"), null, "192.0.2.200").status,
+                "the address is locked for passwords");
+        assertTrue(a.authenticate("Bearer " + presented, null, "192.0.2.200").ok(), "the valid token still gets in");
         Authenticator.Result wrong = a.authenticate("Bearer " + presented.replace('A', 'B'), null, "192.0.2.201");
         assertEquals(401, wrong.status);
         assertEquals(401, a.authenticate("Bearer not-a-token", null, "192.0.2.202").status);
