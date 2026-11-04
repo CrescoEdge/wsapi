@@ -7,6 +7,8 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.attribute.PosixFileAttributes;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.Objects;
 import java.util.function.LongSupplier;
 
@@ -18,6 +20,12 @@ import java.util.function.LongSupplier;
  * 0400, in a directory no one else can write). A file that fails that check or does not parse is an ERROR and
  * leaves no user able to log in (fail closed) until it is fixed; the service key, if enabled, still works. A missing
  * file means no users.
+ *
+ * <p>Every check (at most once a second) compares the file's content stamp AND the owner and mode of the file and of
+ * its directory, so a permission change alone (chmod 644, a backup tool restoring modes, a group-readable deploy) is
+ * noticed within a second: the file is checked again and refused, which also closes the open per-user connections
+ * (Authenticator#revocation). It used to be re-checked only when its modification time, size or file key changed, none
+ * of which a chmod changes.
  */
 public final class CredentialFile {
 
@@ -76,11 +84,30 @@ public final class CredentialFile {
         }
     }
 
+    /**
+     * What a change of the file shows in: its modification time, size and file key, and the owner and mode of the file
+     * and of its directory (what {@link OwnerOnlyFile} checks), so a chmod or chown alone is noticed too.
+     */
     private Object stampOf() {
         try {
             if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) return null;
             BasicFileAttributes a = Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-            return a.lastModifiedTime().toMillis() + "/" + a.size() + "/" + a.fileKey();
+            return a.lastModifiedTime().toMillis() + "/" + a.size() + "/" + a.fileKey() + "/" + access(path, true)
+                    + "/" + access(path.toAbsolutePath().getParent(), false);
+        } catch (Exception e) {
+            return "unreadable:" + e.getClass().getSimpleName();
+        }
+    }
+
+    /** Owner and POSIX mode of a path (the file itself, not a link's target), or a marker where the filesystem has none. */
+    private static String access(Path p, boolean noFollow) {
+        if (p == null) return "-";
+        try {
+            PosixFileAttributes a = noFollow ? Files.readAttributes(p, PosixFileAttributes.class, LinkOption.NOFOLLOW_LINKS)
+                    : Files.readAttributes(p, PosixFileAttributes.class);
+            return a.owner().getName() + ":" + PosixFilePermissions.toString(a.permissions());
+        } catch (UnsupportedOperationException noPosix) {
+            return "no-posix";
         } catch (Exception e) {
             return "unreadable:" + e.getClass().getSimpleName();
         }

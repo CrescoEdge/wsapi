@@ -59,7 +59,10 @@ Every upgrade request must authenticate, on every endpoint:
 Passwords are stored as PBKDF2-HMAC-SHA-384 hashes (600,000 iterations, a 32-byte random salt per user) in
 `ws.users` in the plugin data directory, or the file named by `wsapi_users_file`. The file must be owner-only (mode
 0600 or 0400, owned by the agent's user); one wsapi cannot read, or that does not parse, lets no user log in until it
-is fixed (the error names the line). wsapi re-reads it within a second of a change. Manage it with the tool in the
+is fixed (the error names the line). wsapi re-reads it within a second of a change, and checks its owner and mode (and
+its directory's) every second as well: a file that becomes group- or world-readable, or a directory others can write,
+is refused within a second, which also closes the open per-user connections (a chmod alone used to go unnoticed until
+the content next changed). Manage it with the tool in the
 wsapi jar (the password is read from the terminal without echo, or as the first line of standard input; never from
 the command line):
 
