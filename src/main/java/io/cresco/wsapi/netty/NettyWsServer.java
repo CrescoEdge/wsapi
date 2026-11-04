@@ -23,28 +23,27 @@ import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.ssl.SslProvider;
 
 import javax.net.ssl.KeyManagerFactory;
-import java.nio.file.Path;
 import java.security.KeyStore;
-import java.util.concurrent.Executors;
 
 /**
  * Netty replacement for the embedded Jetty 12 wsapi server. One TLS (wss) listener that
  * serves all three Cresco WebSocket endpoints ({@code /api/dataplane}, {@code /api/apisocket},
- * {@code /api/logstreamer}) with {@code cresco_service_key} header auth on the HTTP upgrade.
+ * {@code /api/logstreamer}); every upgrade is authenticated ({@link WsRouter}, {@link io.cresco.wsapi.auth.Authenticator}).
  *
  * Pipeline per connection: SslHandler -> HttpServerCodec -> HttpObjectAggregator -> WsRouter.
- * The router validates the auth header, then (per path) reconfigures the pipeline with a
+ * The router authenticates the upgrade off the event loop, then (per path) reconfigures the pipeline with a
  * WebSocketServerProtocolHandler + frame aggregator + the endpoint handler and lets the upgrade
- * proceed. Uses the same self-signed keystore Plugin already mints.
+ * proceed. TLS uses the PKCS12 identity from {@link io.cresco.wsapi.tls.WsapiKeystore}.
  */
 public class NettyWsServer {
 
     private final PluginBuilder plugin;
     private final CLogger logger;
     private final int port;
-    private final Path keyStorePath;
+    private final KeyStore keyStore;
     private final char[] keyStorePassword;
     private final int ioBufferBytes;
+    private final WsRouter.Gate gate;
 
     private EventLoopGroup bossGroup;
     private EventLoopGroup workerGroup;
@@ -57,29 +56,21 @@ public class NettyWsServer {
     private final java.util.concurrent.atomic.AtomicInteger socketBufferBytes = new java.util.concurrent.atomic.AtomicInteger(4 * 1024 * 1024);
     private final java.util.concurrent.atomic.AtomicInteger writeHighWaterBytes = new java.util.concurrent.atomic.AtomicInteger(2 * 1024 * 1024);
 
-    public NettyWsServer(PluginBuilder plugin, int port, Path keyStorePath, char[] keyStorePassword, int ioBufferBytes) {
+    public NettyWsServer(PluginBuilder plugin, int port, KeyStore keyStore, char[] keyStorePassword, int ioBufferBytes,
+                         WsRouter.Gate gate) {
         this.plugin = plugin;
         this.logger = plugin.getLogger(NettyWsServer.class.getName(), CLogger.Level.Info);
         this.port = port;
-        this.keyStorePath = keyStorePath;
+        this.keyStore = keyStore;
         this.keyStorePassword = keyStorePassword;
         this.ioBufferBytes = ioBufferBytes;
+        this.gate = gate;
     }
 
     private SslContext buildServerSslContext() throws Exception {
-        KeyStore ks = KeyStore.getInstance("PKCS12");
-        // the wsapi keystore is written by Plugin.generateCertChainKeyStore as PKCS12
-        try (java.io.InputStream in = java.nio.file.Files.newInputStream(keyStorePath)) {
-            ks.load(in, keyStorePassword);
-        } catch (Exception primary) {
-            // fall back to JKS if the store isn't PKCS12
-            ks = KeyStore.getInstance("JKS");
-            try (java.io.InputStream in = java.nio.file.Files.newInputStream(keyStorePath)) {
-                ks.load(in, keyStorePassword);
-            }
-        }
+        // PKCS12 only, loaded and policy-checked by WsapiKeystore (the JKS fallback is gone)
         KeyManagerFactory kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
-        kmf.init(ks, keyStorePassword);
+        kmf.init(keyStore, keyStorePassword);
 
         // TLS provider: default JDK (SSLEngine). Set wsapi_ssl_provider=OPENSSL to use the native
         // BoringSSL provider (netty-tcnative) -- ~2-3x faster bulk crypto, the single-stream ceiling.
@@ -140,7 +131,7 @@ public class NettyWsServer {
                         p.addLast("http", new HttpServerCodec());
                         // aggregate the HTTP upgrade request (small); WS frames handled after upgrade
                         p.addLast("aggregator", new HttpObjectAggregator(65536));
-                        p.addLast("router", new WsRouter(plugin, ioBufferBytes));
+                        p.addLast("router", new WsRouter(plugin, ioBufferBytes, gate));
                     }
                 });
 
@@ -165,10 +156,17 @@ public class NettyWsServer {
         }
     }
 
+    /** The port the server listens on (the configured one, or the one picked for port 0). */
+    public int boundPort() {
+        Channel ch = serverChannel;
+        return ch == null ? -1 : ((java.net.InetSocketAddress) ch.localAddress()).getPort();
+    }
+
     public void stop() {
         try { if (serverChannel != null) serverChannel.close().sync(); } catch (Exception ignore) {}
         if (bossGroup != null) bossGroup.shutdownGracefully();
         if (workerGroup != null) workerGroup.shutdownGracefully();
+        if (gate != null) gate.shutdown();
         logger.info("wsapi Netty WebSocket server stopped");
     }
 }

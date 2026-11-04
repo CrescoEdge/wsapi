@@ -5,6 +5,7 @@ import io.cresco.library.data.TopicType;
 import io.cresco.library.messaging.MsgEvent;
 import io.cresco.library.plugin.PluginBuilder;
 import io.cresco.library.utilities.CLogger;
+import io.cresco.wsapi.auth.Authenticator;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
@@ -40,9 +41,19 @@ public class LogStreamerWsHandler extends SimpleChannelInboundHandler<WebSocketF
     private volatile String enabledRegion;
     private volatile String enabledAgent;
 
-    public LogStreamerWsHandler(PluginBuilder plugin) {
+    private final Authenticator.Principal principal;
+    private final WsRouter.Gate gate;
+
+    public LogStreamerWsHandler(PluginBuilder plugin, Authenticator.Principal principal, WsRouter.Gate gate) {
         this.plugin = plugin;
         this.logger = plugin.getLogger(LogStreamerWsHandler.class.getName(), CLogger.Level.Info);
+        this.principal = principal;
+        this.gate = gate;
+    }
+
+    /** The configuration RPCs this stream sends go out for its authenticated client, never as wsapi itself. */
+    private MsgEvent rpc(MsgEvent req) {
+        return gate.gateway.rpc(req, 0, principal);
     }
 
     @Override
@@ -119,7 +130,7 @@ public class LogStreamerWsHandler extends SimpleChannelInboundHandler<WebSocketF
             req.setParam("baseclassname", baseclass);
             req.setParam("loglevel", loglevel);
             req.setParam("session_id", logSessionId);
-            MsgEvent resp = plugin.sendRPC(req);
+            MsgEvent resp = rpc(req);
             String respMessage = "Error setting loglevel";
             if (resp != null && resp.paramsContains("status_code")) {
                 if ("7".equals(resp.getParam("status_code"))) {
@@ -145,7 +156,7 @@ public class LogStreamerWsHandler extends SimpleChannelInboundHandler<WebSocketF
             req.setParam("action", "setlogdp");
             req.setParam("setlogdp", String.valueOf(isEnabled));
             req.setParam("session_id", logSessionId);
-            MsgEvent resp = plugin.sendRPC(req);
+            MsgEvent resp = rpc(req);
             return resp != null && resp.paramsContains("status_code") && "7".equals(resp.getParam("status_code"));
         } catch (Exception ex) {
             logger.error("LogStreamer.setAgentLogDP failed: " + ex.getMessage());

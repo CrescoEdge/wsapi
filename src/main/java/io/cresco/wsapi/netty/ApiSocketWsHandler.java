@@ -4,7 +4,9 @@ import com.google.common.reflect.TypeToken;
 import com.google.gson.Gson;
 import io.cresco.library.messaging.MsgEvent;
 import io.cresco.library.plugin.PluginBuilder;
+import io.cresco.library.security.TenantNamespace;
 import io.cresco.library.utilities.CLogger;
+import io.cresco.wsapi.auth.Authenticator;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
@@ -12,6 +14,7 @@ import io.netty.handler.codec.http.websocketx.WebSocketFrame;
 
 import java.lang.reflect.Type;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -20,7 +23,12 @@ import java.util.concurrent.TimeUnit;
 /**
  * Netty port of {@code APISocket} — MsgEvent RPC/emit bridge. Text frame carries
  * {@code {"message_info":{...},"message_payload":{...}}}; builds the MsgEvent for the requested
- * type, then either {@code sendRPC} (reply with the response params as JSON) or {@code msgOut}.
+ * type, then sends it for the authenticated client ({@link ApiGateway}): an RPC (reply with the response params as
+ * JSON) or fire-and-forget.
+ *
+ * <p>Before anything is sent: the reserved caller parameters ({@code cresco_caller}, {@code cresco_caller_tenant},
+ * {@code cresco_caller_roles}) are removed from the client's payload (only the controller sets them), and a message
+ * that names another tenant ({@code cresco_tenant}) is refused unless the client is an admin of a superuser tenant.
  */
 public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFrame> {
 
@@ -44,12 +52,36 @@ public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFra
             },
             new ThreadPoolExecutor.CallerRunsPolicy());
 
+    /** Parameters only the controller may set (the verified caller); a client's values are dropped. */
+    static final Set<String> RESERVED_PARAMS = Set.of("cresco_caller", "cresco_caller_tenant", "cresco_caller_roles");
+
     private final PluginBuilder plugin;
     private final CLogger logger;
+    private final Authenticator.Principal principal;
+    private final WsRouter.Gate gate;
 
-    public ApiSocketWsHandler(PluginBuilder plugin) {
+    public ApiSocketWsHandler(PluginBuilder plugin, Authenticator.Principal principal, WsRouter.Gate gate) {
         this.plugin = plugin;
         this.logger = plugin.getLogger(ApiSocketWsHandler.class.getName(), CLogger.Level.Info);
+        this.principal = principal;
+        this.gate = gate;
+    }
+
+    /**
+     * Vet a client's payload before it becomes a message: drop the reserved caller parameters (in place) and refuse a
+     * message aimed at another tenant unless the caller may target it.
+     *
+     * @return null when the message may be sent, else why not
+     */
+    static String vet(Map<String, String> payload, Authenticator.Principal caller, Authenticator auth) {
+        if (caller == null || auth == null) return "no authenticated caller";
+        if (payload == null) return null;
+        payload.keySet().removeIf(RESERVED_PARAMS::contains);
+        String target = payload.get(TenantNamespace.TENANT_PARAM);
+        if (target != null && !auth.mayTarget(caller, target)) {
+            return caller + " may not address tenant " + target;
+        }
+        return null;
     }
 
     @Override
@@ -58,15 +90,27 @@ public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFra
         try {
             String message = ((TextWebSocketFrame) frame).text();
             Map<String, Map<String, String>> incoming = gson.fromJson(message, TYPE);
+            Map<String, String> mi = incoming == null ? null : incoming.get("message_info");
+            Map<String, String> payload = incoming == null ? null : incoming.get("message_payload");
+            boolean isRPC = mi != null && Boolean.parseBoolean(mi.get("is_rpc"));
+            String refusal = vet(payload, principal, gate == null ? null : gate.authenticator);
+            if (refusal != null) {
+                logger.warn("wsapi refused a message from " + principal + ": " + refusal);
+                if (isRPC) ctx.writeAndFlush(new TextWebSocketFrame(failure(payload, "403", "unauthorized: " + refusal)));
+                return;
+            }
             MsgEvent request = buildMsgEvent(incoming);
-            boolean isRPC = Boolean.parseBoolean(incoming.get("message_info").get("is_rpc"));
+            if (request == null) {
+                if (isRPC) ctx.writeAndFlush(new TextWebSocketFrame(failure(payload, "400", "unknown or malformed message_info")));
+                return;
+            }
+            for (String r : RESERVED_PARAMS) request.removeParam(r);
             if (isRPC) {
-                long timeoutMs = rpcTimeoutMs(incoming.get("message_info"));
-                Map<String, String> payload = incoming.get("message_payload");
+                long timeoutMs = rpcTimeoutMs(mi);
                 RPC_POOL.submit(() -> {
                     String r;
                     try {
-                        MsgEvent response = timeoutMs > 0 ? plugin.sendRPC(request, timeoutMs) : plugin.sendRPC(request);
+                        MsgEvent response = gate.gateway.rpc(request, timeoutMs, principal);
                         r = (response == null) ? failure(payload, "504", "no reply within "
                                 + (timeoutMs > 0 ? timeoutMs : DEFAULT_RPC_TIMEOUT_MS) + " ms; the operation may still complete")
                                 : success(response);
@@ -77,7 +121,7 @@ public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFra
                     ctx.writeAndFlush(new TextWebSocketFrame(r));
                 });
             } else {
-                plugin.msgOut(request);
+                gate.gateway.send(request, principal);
             }
         } catch (Exception ex) {
             logger.error("ApiSocketWsHandler: " + ex.getMessage());
