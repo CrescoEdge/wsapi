@@ -62,6 +62,7 @@ class WsapiServerAuthTest {
         dir = Files.createTempDirectory("wsapi-it");
         Map<String, Object> config = new HashMap<>();
         config.put("pluginID", "plugin/9");
+        config.put("wsapi_upgrade_timeout_seconds", "2");
         plugin = TestSupport.pluginBuilder(dir, config, log);
         tls = WsapiKeystore.loadOrCreate(new WsapiKeystore.Settings().dataDir(dir).identity("region-1", "agent-1", "plugin/9").hostSans(false),
                 new WsapiKeystore.Log() {
@@ -246,6 +247,31 @@ class WsapiServerAuthTest {
             port = main;
             strict.stop();
         }
+    }
+
+    @Test
+    void aConnectionThatNeverUpgradesIsClosedAtTheDeadline() throws Exception {
+        long before = NettyWsServer.upgradeTimeouts.get();
+        javax.net.ssl.SSLSocket s = (javax.net.ssl.SSLSocket) trusting.getSocketFactory().createSocket("localhost", port);
+        s.startHandshake();                                           // TLS done, then nothing: no upgrade request
+        s.setSoTimeout(10_000);
+        long t0 = System.currentTimeMillis();
+        int r;
+        try {
+            r = s.getInputStream().read();
+        } catch (java.io.IOException closed) {
+            r = -1;
+        }
+        long waited = System.currentTimeMillis() - t0;
+        assertEquals(-1, r, "the server closed the idle connection");
+        assertTrue(waited >= 1000 && waited < 9000, "closed at the deadline, after " + waited + " ms");
+        assertTrue(NettyWsServer.upgradeTimeouts.get() > before);
+        s.close();
+        // a client that upgrades in time keeps its connection past the deadline
+        Client c = open(WsRouter.APISOCKET_PATH, basic("bob", "bob-password-22"));
+        Thread.sleep(2500);
+        rpc(c, Map.of("action", "listregions"));
+        c.ws.abort();
     }
 
     @Test
