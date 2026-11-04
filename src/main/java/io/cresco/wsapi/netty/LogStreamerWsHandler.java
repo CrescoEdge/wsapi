@@ -85,9 +85,10 @@ public class LogStreamerWsHandler extends SimpleChannelInboundHandler<WebSocketF
                     try {
                         if (msg instanceof TextMessage) {
                             TextMessage tm = (TextMessage) msg;
+                            // message parameters in the line are redacted by allowlist (LogRedaction)
                             String line = tm.getStringProperty("region_id") + "_" + tm.getStringProperty("agent_id")
                                     + " [ " + tm.getStringProperty("logid") + "] " + tm.getStringProperty("loglevel")
-                                    + " " + tm.getText();
+                                    + " " + LogRedaction.redact(tm.getText());
                             ch.writeAndFlush(new TextWebSocketFrame(line));
                         }
                     } catch (Exception ex) {
@@ -96,6 +97,8 @@ public class LogStreamerWsHandler extends SimpleChannelInboundHandler<WebSocketF
                 }
             };
             String dpQuery = "region_id IS NOT NULL AND agent_id IS NOT NULL AND event = 'logger' AND session_id = '" + logSessionId + "'";
+            // a user never receives lines below Warn (Info, Debug and Trace can carry message contents)
+            if (!principal.isAdmin()) dpQuery += " AND (loglevel = 'Warn' OR loglevel = 'Error')";
             listenerId = plugin.getAgentService().getDataPlaneService().addMessageListener(TopicType.AGENT, ml, dpQuery);
             return true;
         } catch (Exception ex) {
@@ -107,6 +110,12 @@ public class LogStreamerWsHandler extends SimpleChannelInboundHandler<WebSocketF
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, WebSocketFrame frame) {
         if (!(frame instanceof TextWebSocketFrame)) return;
+        if (!principal.isAdmin()) {
+            // log levels and log routing are an admin's: a user raising io.cresco to Trace read other users' messages
+            logger.warn("LogStreamerWsHandler: refused a log configuration from " + principal + " (admin only)");
+            ctx.writeAndFlush(new TextWebSocketFrame("refused: only an admin may set log levels or log routing"));
+            return;
+        }
         String message = ((TextWebSocketFrame) frame).text();
         String[] sst = message.split(",");
         if (sst.length != 4) return;

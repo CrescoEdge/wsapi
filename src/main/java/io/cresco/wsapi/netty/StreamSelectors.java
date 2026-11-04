@@ -45,6 +45,34 @@ public final class StreamSelectors {
                 && !s.toUpperCase(Locale.ROOT).startsWith("JMS");
     }
 
+    /** Property names only infrastructure writes (filerepo frames, executor and logger events, wsapi's own stamps). */
+    static final Set<String> INFRASTRUCTURE_NAMES = Set.of("seq_num", "offset", "total_bytes", "sha384", "start_byte",
+            "byte_length", "dp_bytes", "region_id", "agent_id", "plugin_id", "pluginname", "event", "loglevel", "logid",
+            "session_id");
+
+    /**
+     * True for a property name a dataplane client may not write: {@code cresco_*} (the verified caller and writer, tenant
+     * routing), {@code transfer_*} and the other names infrastructure stamps ({@link #INFRASTRUCTURE_NAMES}), any case.
+     */
+    public static boolean reservedName(String s) {
+        if (s == null) return true;
+        String l = s.toLowerCase(Locale.ROOT);
+        return l.startsWith("cresco_") || l.startsWith("transfer_") || INFRASTRUCTURE_NAMES.contains(l);
+    }
+
+    /** The values a query compares {@code ident} to with {@code =} (the AND terms of a safe query). */
+    public static List<String> equalityValues(String q, String ident) {
+        List<String> out = new ArrayList<>();
+        List<String> t = tokens(q);
+        for (int i = 0; i + 2 < t.size(); i++) {
+            if (t.get(i).equals(ident) && t.get(i + 1).equals("=") && t.get(i + 2).startsWith("'")) {
+                String v = t.get(i + 2);
+                out.add(v.substring(1, v.length() - 1));
+            }
+        }
+        return out;
+    }
+
     public static boolean value(String s) { return s != null && VALUE.matcher(s).matches(); }
 
     /** Matches no stdin message: no {@code type}, or a {@code type} other than {@code input} and {@code input-*}. */
@@ -63,8 +91,10 @@ public final class StreamSelectors {
             return q;
         }
         if (!identifier(si.getIdentKey())) throw new IllegalArgumentException("ident_key must be a plain identifier");
+        if (reservedName(si.getIdentKey())) throw new IllegalArgumentException("ident_key " + si.getIdentKey() + " is a property only infrastructure writes");
         if (!value(si.getIdentId())) throw new IllegalArgumentException("ident_id must match " + VALUE.pattern());
         if (si.getIoTypeKey() != null && !identifier(si.getIoTypeKey())) throw new IllegalArgumentException("io_type_key must be a plain identifier");
+        if (si.getIoTypeKey() != null && reservedName(si.getIoTypeKey())) throw new IllegalArgumentException("io_type_key " + si.getIoTypeKey() + " is a property only infrastructure writes");
         for (String v : new String[]{si.getInputId(), si.getOutputId()})
             if (v != null && !value(v)) throw new IllegalArgumentException("input_id and output_id must match " + VALUE.pattern());
         return si.getIdentKey() + "='" + si.getIdentId() + "'";

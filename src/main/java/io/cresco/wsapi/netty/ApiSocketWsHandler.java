@@ -16,8 +16,6 @@ import io.netty.handler.codec.http.websocketx.WebSocketFrame;
 import java.lang.reflect.Type;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
@@ -36,22 +34,33 @@ public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFra
     private static final Gson gson = new Gson();
     private static final Type TYPE = new TypeToken<Map<String, Map<String, String>>>() {}.getType();
 
-    // sendRPC blocks up to the RPC timeout (30s default); answering on the channel thread
-    // serializes every request behind the slowest one (one hung RPC head-of-line blocks the
-    // whole connection for its full timeout). RPCs are answered from this pool instead;
-    // under overload CallerRunsPolicy degrades gracefully to the old inline behavior.
-    // Responses may then complete out of order — clients either correlate replies
-    // (pycrescolib stamps client_rpc_id into the payload, echoed back by the controller)
-    // or issue one request at a time, which every sync client does.
-    private static final ExecutorService RPC_POOL = new ThreadPoolExecutor(
-            0, 64, 60L, TimeUnit.SECONDS,
-            new SynchronousQueue<>(),
+    // sendRPC blocks up to the RPC timeout; RPCs are answered from this bounded pool, never on a Netty event loop (the
+    // old CallerRunsPolicy ran an overflowing RPC on the event loop, so one caller's hung RPCs stopped every client's
+    // traffic). A full pool, or a caller at its in-flight limit, gets an immediate "busy" (429) reply instead.
+    // Responses may complete out of order: clients correlate replies (pycrescolib stamps client_rpc_id, echoed back)
+    // or issue one request at a time.
+    static final int RPC_THREADS = 128;
+    static final int RPC_QUEUE = 512;
+    private static final ThreadPoolExecutor RPC_POOL = new ThreadPoolExecutor(
+            RPC_THREADS, RPC_THREADS, 60L, TimeUnit.SECONDS,
+            new java.util.concurrent.ArrayBlockingQueue<>(RPC_QUEUE),
             r -> {
                 Thread t = new Thread(r, "wsapi-apisocket-rpc");
                 t.setDaemon(true);
                 return t;
             },
-            new ThreadPoolExecutor.CallerRunsPolicy());
+            new ThreadPoolExecutor.AbortPolicy());
+    static {
+        RPC_POOL.allowCoreThreadTimeOut(true);
+    }
+
+    /** RPCs each caller has in flight (all of the caller's connections together). */
+    static final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger> IN_FLIGHT =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    /** Default in-flight RPC limits and timeout caps, by role. */
+    static final int DEFAULT_MAX_INFLIGHT_USER = 8;
+    static final int DEFAULT_MAX_INFLIGHT_ADMIN = 32;
+    static final long DEFAULT_MAX_TIMEOUT_USER_MS = 120_000L;
 
     /** Parameters only the controller may set (the verified caller); a client's values are dropped. */
     static final Set<String> RESERVED_PARAMS = Caller.RESERVED_PARAMS;
@@ -85,6 +94,59 @@ public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFra
         return null;
     }
 
+    /**
+     * For a {@code user}, the region a message is addressed to must be this agent's own: an agent joins only a region
+     * controller of its own tenant, so this agent's region is the one region known to be the user's tenant (the
+     * controller does not tell wsapi the tenant of other regions). Admins are not limited here; the controller authorizes
+     * every message again.
+     *
+     * @return null when the destination is allowed, else why not
+     */
+    static String destinationRefusal(Map<String, String> mi, Authenticator.Principal caller, String localRegion, String globalRegion) {
+        if (caller == null || caller.isAdmin()) return null;
+        if (mi == null) return "no message_info";
+        String type = mi.get("message_type");
+        String region;
+        if (type == null) return "no message_type";
+        switch (type) {
+            case "global_controller_msgevent":   region = mi.containsKey("region_id") ? mi.get("region_id") : globalRegion; break;
+            case "global_agent_msgevent":
+            case "global_plugin_msgevent":       region = mi.get("dst_region"); break;
+            case "regional_controller_msgevent": region = mi.containsKey("region_id") ? mi.get("region_id") : localRegion; break;
+            case "regional_agent_msgevent":
+            case "regional_plugin_msgevent":
+            case "kpi_msgevent":
+            case "agent_msgevent":
+            case "plugin_msgevent":              region = localRegion; break;
+            default: return "unknown message_type";
+        }
+        if (region == null || localRegion == null || !region.equals(localRegion)) {
+            return caller + " may only address its own tenant's region " + localRegion + ", not " + region
+                    + " (no other region is known to be in tenant " + caller.tenant + ")";
+        }
+        return null;
+    }
+
+    private int maxInFlight() {
+        try {
+            return principal.isAdmin()
+                    ? plugin.getConfig().getIntegerParam("wsapi_rpc_max_inflight_admin", DEFAULT_MAX_INFLIGHT_ADMIN)
+                    : plugin.getConfig().getIntegerParam("wsapi_rpc_max_inflight_user", DEFAULT_MAX_INFLIGHT_USER);
+        } catch (RuntimeException e) {
+            return principal.isAdmin() ? DEFAULT_MAX_INFLIGHT_ADMIN : DEFAULT_MAX_INFLIGHT_USER;
+        }
+    }
+
+    private long maxTimeoutMs() {
+        if (principal.isAdmin()) return MAX_RPC_TIMEOUT_MS;
+        try {
+            long v = plugin.getConfig().getLongParam("wsapi_rpc_max_timeout_user_ms", DEFAULT_MAX_TIMEOUT_USER_MS);
+            return Math.max(1_000L, Math.min(MAX_RPC_TIMEOUT_MS, v));
+        } catch (RuntimeException e) {
+            return DEFAULT_MAX_TIMEOUT_USER_MS;
+        }
+    }
+
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, WebSocketFrame frame) {
         if (!(frame instanceof TextWebSocketFrame)) return;
@@ -95,6 +157,9 @@ public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFra
             Map<String, String> payload = incoming == null ? null : incoming.get("message_payload");
             boolean isRPC = mi != null && Boolean.parseBoolean(mi.get("is_rpc"));
             String refusal = vet(payload, principal, gate == null ? null : gate.authenticator);
+            if (refusal == null) {
+                refusal = destinationRefusal(mi, principal, plugin.getRegion(), globalRegion());
+            }
             if (refusal != null) {
                 logger.warn("wsapi refused a message from " + principal + ": " + refusal);
                 if (isRPC) ctx.writeAndFlush(new TextWebSocketFrame(failure(payload, "403", "unauthorized: " + refusal)));
@@ -107,8 +172,18 @@ public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFra
             }
             for (String r : RESERVED_PARAMS) request.removeParam(r);
             if (isRPC) {
-                long timeoutMs = rpcTimeoutMs(mi);
-                RPC_POOL.submit(() -> {
+                long cap = maxTimeoutMs();
+                long asked = rpcTimeoutMs(mi);
+                long timeoutMs = asked > 0 ? Math.min(asked, cap) : (DEFAULT_RPC_TIMEOUT_MS <= cap ? 0 : cap);
+                java.util.concurrent.atomic.AtomicInteger mine = IN_FLIGHT.computeIfAbsent(principal.key(), k -> new java.util.concurrent.atomic.AtomicInteger());
+                int limit = maxInFlight();
+                if (mine.incrementAndGet() > limit) {
+                    mine.decrementAndGet();
+                    ctx.writeAndFlush(new TextWebSocketFrame(failure(payload, "429", "busy: " + principal + " has " + limit
+                            + " requests in flight (wsapi_rpc_max_inflight_" + (principal.isAdmin() ? "admin" : "user") + "); retry when one finishes")));
+                    return;
+                }
+                Runnable task = () -> {
                     String r;
                     try {
                         MsgEvent response = gate.gateway.rpc(request, timeoutMs, principal);
@@ -122,14 +197,31 @@ public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFra
                     } catch (Exception ex) {
                         logger.error("ApiSocketWsHandler rpc: " + ex.getMessage());
                         r = failure(payload, "500", "rpc failed: " + ex.getMessage());
+                    } finally {
+                        mine.decrementAndGet();
                     }
                     ctx.writeAndFlush(new TextWebSocketFrame(r));
-                });
+                };
+                try {
+                    RPC_POOL.execute(task);
+                } catch (java.util.concurrent.RejectedExecutionException full) {
+                    mine.decrementAndGet();
+                    ctx.writeAndFlush(new TextWebSocketFrame(failure(payload, "503", "busy: wsapi has " + (RPC_THREADS + RPC_QUEUE)
+                            + " requests in flight; retry shortly")));
+                }
             } else {
                 gate.gateway.send(request, principal);
             }
         } catch (Exception ex) {
             logger.error("ApiSocketWsHandler: " + ex.getMessage());
+        }
+    }
+
+    private String globalRegion() {
+        try {
+            return plugin.getAgentService().getAgentState().getGlobalRegion();
+        } catch (RuntimeException e) {
+            return null;
         }
     }
 

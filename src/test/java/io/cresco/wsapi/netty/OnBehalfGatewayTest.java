@@ -28,9 +28,9 @@ class OnBehalfGatewayTest {
 
     static Authenticator.Principal principal(String tenant, String user, String role) throws Exception {
         // the same constructor path the Authenticator uses: authenticate the service key against a stub
-        Authenticator a = new Authenticator(CredentialStore::empty, () -> "k-k-k-k-k-k", () -> true, () -> tenant, Set::of,
+        Authenticator a = new Authenticator(CredentialStore::empty, () -> "0f1e2d3c4b5a69788796a5b4c3d2e1f0", () -> true, () -> tenant, Set::of,
                 AuthRateLimiter.defaults(), 0, System::currentTimeMillis);
-        Authenticator.Principal sk = a.authenticate(null, "k-k-k-k-k-k", "s").principal;
+        Authenticator.Principal sk = a.authenticate(null, "0f1e2d3c4b5a69788796a5b4c3d2e1f0", "s").principal;
         if (user.equals(sk.user) && role.equals(sk.role)) return sk;
         java.lang.reflect.Constructor<Authenticator.Principal> c = Authenticator.Principal.class
                 .getDeclaredConstructor(String.class, String.class, String.class, boolean.class);

@@ -24,7 +24,7 @@ class AuthenticatorTest {
                     + "mallory:tenant-b:admin:" + PasswordHash.create("mallory-password-5".toCharArray(), R).encode() + "\n", "t");
 
     final AtomicReference<CredentialStore> store = new AtomicReference<>(STORE);
-    final AtomicReference<String> serviceKey = new AtomicReference<>("the-service-key-value");
+    final AtomicReference<String> serviceKey = new AtomicReference<>("the-service-key-value-0123456789abcdef");
     final AtomicBoolean serviceKeyEnabled = new AtomicBoolean(true);
     final AtomicReference<String> tenant = new AtomicReference<>("tenant-a");
     final AtomicLong now = new AtomicLong(1_000_000L);
@@ -64,26 +64,26 @@ class AuthenticatorTest {
 
     @Test
     void theServiceKeyIsAnAdminOfTheAgentsTenantAndCanBeDisabled() {
-        Authenticator.Result r = auth.authenticate(null, "the-service-key-value", "s");
+        Authenticator.Result r = auth.authenticate(null, "the-service-key-value-0123456789abcdef", "s");
         assertTrue(r.ok());
         assertEquals("tenant-a", r.principal.tenant);
         assertEquals("admin", r.principal.role);
         assertEquals("service-key", r.principal.user);
         assertTrue(r.principal.serviceKey);
-        assertEquals(401, auth.authenticate(null, "the-service-key-valuE", "s").status);
+        assertEquals(401, auth.authenticate(null, "the-service-key-value-0123456789abcdeE", "s").status);
         serviceKeyEnabled.set(false);
-        assertEquals(401, auth.authenticate(null, "the-service-key-value", "s2").status);
+        assertEquals(401, auth.authenticate(null, "the-service-key-value-0123456789abcdef", "s2").status);
         serviceKeyEnabled.set(true);
         serviceKey.set(null);
-        assertEquals(401, auth.authenticate(null, "the-service-key-value", "s3").status, "no key configured: nothing matches");
+        assertEquals(401, auth.authenticate(null, "the-service-key-value-0123456789abcdef", "s3").status, "no key configured: nothing matches");
     }
 
     @Test
     void basicWinsOverTheServiceKeyWhenBothAreSent() {
-        Authenticator.Result r = auth.authenticate(basic("bob", "bob-password-22"), "the-service-key-value", "s");
+        Authenticator.Result r = auth.authenticate(basic("bob", "bob-password-22"), "the-service-key-value-0123456789abcdef", "s");
         assertTrue(r.ok());
         assertEquals("bob", r.principal.user);
-        assertEquals(401, auth.authenticate(basic("bob", "x"), "the-service-key-value", "s").status, "a valid key does not rescue a bad password");
+        assertEquals(401, auth.authenticate(basic("bob", "x"), "the-service-key-value-0123456789abcdef", "s").status, "a valid key does not rescue a bad password");
     }
 
     @Test
@@ -106,20 +106,60 @@ class AuthenticatorTest {
     void anUnknownAgentTenantFailsClosed() {
         tenant.set(null);
         assertEquals(503, auth.authenticate(basic("alice", ALICE_PW), null, "s").status);
-        assertEquals(503, auth.authenticate(null, "the-service-key-value", "s").status);
+        assertEquals(503, auth.authenticate(null, "the-service-key-value-0123456789abcdef", "s").status);
     }
 
     @Test
     void repeatedFailuresAreRateLimitedEvenWithTheRightPassword() {
-        for (int i = 0; i < 5; i++) assertEquals(401, auth.authenticate(basic("alice", "guess" + i), null, "10.6.6.6").status);
+        int refused = 0;
+        for (int i = 0; i < 5; i++) {
+            int st = auth.authenticate(basic("alice", "guess" + i), null, "10.6.6.6").status;
+            assertTrue(st == 401 || st == 429, "status " + st);
+            if (st == 429) refused++;
+        }
+        assertTrue(refused > 0, "alice's delays at this source start after " + AuthRateLimiter.FREE_PAIR_FAILURES + " failures");
         Authenticator.Result r = auth.authenticate(basic("alice", ALICE_PW), null, "10.6.6.6");
-        assertEquals(429, r.status);
-        assertEquals(60, r.retryAfterSeconds);
-        assertTrue(auth.authenticate(basic("alice", ALICE_PW), null, "10.0.0.9").ok(), "other sources are unaffected");
+        assertEquals(429, r.status, "the right password from the guessing source waits too");
+        assertTrue(r.retryAfterSeconds >= 1);
+        assertTrue(auth.authenticate(basic("alice", ALICE_PW), null, "10.0.0.9").ok(), "alice elsewhere is unaffected");
         for (int i = 0; i < 5; i++) auth.authenticate(null, "wrong-key", "10.7.7.7");
-        assertEquals(429, auth.authenticate(null, "the-service-key-value", "10.7.7.7").status, "service key guesses count too");
-        now.addAndGet(61_000L);
-        assertTrue(auth.authenticate(basic("alice", ALICE_PW), null, "10.6.6.6").ok());
+        assertEquals(429, auth.authenticate(null, "the-service-key-value-0123456789abcdef", "10.7.7.7").status, "service key guesses count too");
+        now.addAndGet(16 * 60_000L);
+        assertTrue(auth.authenticate(basic("alice", ALICE_PW), null, "10.6.6.6").ok(), "the delays run out");
+    }
+
+    @Test
+    void aWeakServiceKeyIsNeverAccepted() {
+        for (String weak : new String[]{"12345", "cresco", "changeit", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "short-key-1", "abcdefghijklmnopqrst", "0123456789012345678901234567890123"}) {
+            assertNotNull(Authenticator.serviceKeyWeakness(weak), weak);
+            serviceKey.set(weak);
+            Authenticator.Result r = auth.authenticate(null, weak, "weak-" + weak.length());
+            assertEquals(401, r.status, weak);
+            assertTrue(r.logReason.contains("too weak"), r.logReason);
+            // ("cresco" is part of the setting's name, cresco_service_key, in the reason)
+            assertFalse(!weak.equals("cresco") && r.logReason.contains(weak), "the key itself is never logged");
+        }
+        for (String strong : new String[]{"0f1e2d3c4b5a69788796a5b4c3d2e1f0",                 // 32 hex digits, 128 bits
+                "Zk3pQ9vXr2LmT8wYb5NcJ7hG", "the-service-key-value-0123456789abcdef", "9f8b2c4e-1a3d-4f6b-8c7e-2d5a9b1c3e7f"}) {
+            assertNull(Authenticator.serviceKeyWeakness(strong), strong);
+        }
+        serviceKey.set("0f1e2d3c4b5a69788796a5b4c3d2e1f0");
+        assertTrue(auth.authenticate(null, "0f1e2d3c4b5a69788796a5b4c3d2e1f0", "strong").ok());
+        assertNull(auth.serviceKeyProblem());
+    }
+
+    @Test
+    void theFastPathDecidesEverythingThatNeedsNoPbkdf2() {
+        assertEquals(401, auth.authenticateFast("Basic !!!", null, "f1").status, "malformed");
+        assertEquals(401, auth.authenticateFast(null, null, "f2").status, "nothing");
+        assertTrue(auth.authenticateFast(null, "the-service-key-value-0123456789abcdef", "f3").ok(), "the service key");
+        assertNull(auth.authenticateFast(basic("alice", ALICE_PW), null, "f4"), "an unremembered password needs PBKDF2");
+        assertTrue(auth.authenticate(basic("alice", ALICE_PW), null, "f4").ok());
+        Authenticator.Result again = auth.authenticateFast(basic("alice", ALICE_PW), null, "f5");
+        assertNotNull(again, "a remembered password is decided without PBKDF2");
+        assertTrue(again.ok());
+        assertNull(auth.authenticateFast(basic("alice", "not-it"), null, "f6"), "a wrong password still needs PBKDF2");
     }
 
     @Test

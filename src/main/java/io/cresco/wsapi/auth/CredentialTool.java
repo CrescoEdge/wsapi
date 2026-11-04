@@ -21,6 +21,8 @@ import java.util.Arrays;
  *   java -cp wsapi.jar io.cresco.wsapi.auth.CredentialTool add    &lt;file&gt; &lt;user&gt; &lt;tenant&gt; &lt;admin|user&gt;
  *   java -cp wsapi.jar io.cresco.wsapi.auth.CredentialTool passwd &lt;file&gt; &lt;user&gt;
  *   java -cp wsapi.jar io.cresco.wsapi.auth.CredentialTool remove &lt;file&gt; &lt;user&gt;
+ *   java -cp wsapi.jar io.cresco.wsapi.auth.CredentialTool grant  &lt;file&gt; &lt;user&gt; &lt;stream|prefix*&gt;
+ *   java -cp wsapi.jar io.cresco.wsapi.auth.CredentialTool revoke &lt;file&gt; &lt;user&gt; &lt;stream|prefix*&gt;
  *   java -cp wsapi.jar io.cresco.wsapi.auth.CredentialTool list   &lt;file&gt;
  * </pre>
  * The password is read from the terminal without echo (twice), or, with no terminal, as the first line of standard
@@ -71,7 +73,7 @@ public final class CredentialTool {
                     if (e == null) throw new IllegalArgumentException("no user " + args[2]);
                     char[] secret = newPassword(pw, args[2]);
                     try {
-                        save(file, store.with(new CredentialStore.Entry(e.user, e.tenant, e.role, PasswordHash.create(secret, new SecureRandom()))));
+                        save(file, store.with(new CredentialStore.Entry(e.user, e.tenant, e.role, PasswordHash.create(secret, new SecureRandom()), e.grants)));
                     } finally {
                         Arrays.fill(secret, '\0');
                     }
@@ -85,6 +87,25 @@ public final class CredentialTool {
                     if (store.get(args[2]) == null) throw new IllegalArgumentException("no user " + args[2]);
                     save(file, store.without(args[2]));
                     out.println("removed " + args[2] + " from " + file);
+                    return 0;
+                }
+                case "grant":
+                case "revoke": {
+                    need(args, 4);
+                    Path file = Paths.get(args[1]);
+                    CredentialStore store = load(file);
+                    CredentialStore.Entry e = store.get(args[2]);
+                    if (e == null) throw new IllegalArgumentException("no user " + args[2]);
+                    String g = args[3];
+                    if (!CredentialStore.GRANT.matcher(g).matches()) throw new IllegalArgumentException("a stream grant must match " + CredentialStore.GRANT.pattern());
+                    java.util.List<String> grants = new java.util.ArrayList<>(e.grants);
+                    if (cmd.equals("grant")) {
+                        if (!grants.contains(g)) grants.add(g);
+                    } else if (!grants.remove(g)) {
+                        throw new IllegalArgumentException(args[2] + " has no grant " + g);
+                    }
+                    save(file, store.with(new CredentialStore.Entry(e.user, e.tenant, e.role, e.hash, grants)));
+                    out.println((cmd.equals("grant") ? "granted " : "revoked ") + g + (cmd.equals("grant") ? " to " : " from ") + args[2] + " in " + file);
                     return 0;
                 }
                 case "list": {
@@ -168,6 +189,8 @@ public final class CredentialTool {
         out.println("  add    <file> <user> <tenant> <admin|user>   add a user (asks for the password)");
         out.println("  passwd <file> <user>                         set a new password");
         out.println("  remove <file> <user>                         remove a user");
+        out.println("  grant  <file> <user> <stream|prefix*>         let a user use a dataplane stream besides their own u:<user>:*");
+        out.println("  revoke <file> <user> <stream|prefix*>         take that back");
         out.println("  list   <file>                                list users (never passwords)");
         out.println("The default file is <agent data>/plugin-data/<wsapi plugin id>/ws.users (wsapi_users_file overrides it).");
         out.println("Without a terminal the password is the first line of standard input.");
