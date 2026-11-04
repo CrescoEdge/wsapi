@@ -56,6 +56,9 @@ public class NettyWsServer {
     private final java.util.concurrent.atomic.AtomicInteger socketBufferBytes = new java.util.concurrent.atomic.AtomicInteger(4 * 1024 * 1024);
     private final java.util.concurrent.atomic.AtomicInteger writeHighWaterBytes = new java.util.concurrent.atomic.AtomicInteger(2 * 1024 * 1024);
 
+    /** Connections closed because they did not complete an authenticated upgrade in time (since start). */
+    public static final java.util.concurrent.atomic.AtomicLong upgradeTimeouts = new java.util.concurrent.atomic.AtomicLong();
+
     public NettyWsServer(PluginBuilder plugin, int port, KeyStore keyStore, char[] keyStorePassword, int ioBufferBytes,
                          WsRouter.Gate gate) {
         this.plugin = plugin;
@@ -110,6 +113,10 @@ public class NettyWsServer {
         readChunkBytes.set(plugin.getConfig().getIntegerParam("wsapi_read_chunk_bytes", 256 * 1024));
         socketBufferBytes.set(plugin.getConfig().getIntegerParam("wsapi_socket_buffer_bytes", 4 * 1024 * 1024));
         writeHighWaterBytes.set(plugin.getConfig().getIntegerParam("wsapi_write_high_water_bytes", 2 * 1024 * 1024));
+        // A connection must finish its TLS handshake and an authenticated WebSocket upgrade within this time, or it is
+        // closed: before, a client could open connections and never send the upgrade, holding them (and memory) forever
+        // without authenticating.
+        final long upgradeTimeoutMs = 1000L * Math.max(1, plugin.getConfig().getIntegerParam("wsapi_upgrade_timeout_seconds", 30));
 
         ServerBootstrap b = new ServerBootstrap();
         b.group(bossGroup, workerGroup)
@@ -132,6 +139,13 @@ public class NettyWsServer {
                         // aggregate the HTTP upgrade request (small); WS frames handled after upgrade
                         p.addLast("aggregator", new HttpObjectAggregator(65536));
                         p.addLast("router", new WsRouter(plugin, ioBufferBytes, gate));
+                        // the router removes itself once the upgrade is authenticated; still there at the deadline: close
+                        ch.eventLoop().schedule(() -> {
+                            if (ch.isActive() && ch.pipeline().get("router") != null) {
+                                upgradeTimeouts.incrementAndGet();
+                                ch.close();
+                            }
+                        }, upgradeTimeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS);
                     }
                 });
 

@@ -99,6 +99,7 @@ the agent's tenant from the controller; until the controller knows it, every cli
 | `wsapi_auth_lockout_seconds` / `wsapi_auth_max_lockout_seconds` | 60 / 900 | first lockout, and the cap of the doubling |
 | `wsapi_auth_cache_seconds` | 300 | how long a verified password is remembered; 0 turns it off |
 | `wsapi_auth_threads` / `wsapi_auth_queue` | cores/2 (2-8) / 256 | authentication workers; a full queue answers 503 |
+| `wsapi_upgrade_timeout_seconds` | 30 | a connection that has not completed an authenticated WebSocket upgrade by then is closed |
 
 ### The dataplane
 
