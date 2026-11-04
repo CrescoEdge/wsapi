@@ -247,8 +247,12 @@ A message over its endpoint's cap, in one frame or in fragments, closes the conn
   there is no stamp. So a client tells a process's real `execution_log` (a map, written by the executor) from a user's
   text that looks like one. Without `envelope` frames are as before, except that a map or streamfile terminal frame
   (an executor event, a transfer's end) also carries `cresco_writer` and `cresco_writer_roles` keys naming its writer;
-  existing clients ignore them. A user cannot forge them: a client's text frame that is a JSON object with a top-level
-  `cresco_writer` key closes the connection (1008).
+  existing clients ignore them; the event's numbers are passed through as written (a long `42` stays `42`, a long
+  above 2^53 stays exact; plain and envelope map frames used to turn every number into a double, `42.0`). A user cannot
+  forge them: a client's text frame that is a JSON object with a top-level `cresco_writer...` key (any case) closes the
+  connection (1008). The frame is parsed to decide, as leniently as Gson reads JSON (which accepts all a strict parser
+  does), so a key spelled with escapes (`"cresco\u005fwriter"`) or given twice counts, however a client's parser decodes
+  it; a frame that may spell the key and is nested more than 1,024 levels deep is refused rather than parsed.
 - **Reserved properties.** No client may name a property infrastructure writes as its `ident_key` or `io_type_key`:
   `cresco_*`, `transfer_*`, `seq_num`, `offset`, `total_bytes`, `sha384`, `start_byte`, `byte_length`, `dp_bytes`,
   `region_id`, `agent_id`, `plugin_id`, `pluginname`, `event`, `loglevel`, `logid`, `session_id`. Everything a client
