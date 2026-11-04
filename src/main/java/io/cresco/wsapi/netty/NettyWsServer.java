@@ -170,6 +170,9 @@ public class NettyWsServer {
         }
     }
 
+    /** The admission gate of this server (authentication, limits, revocation, the inbound budget). */
+    public WsRouter.Gate gate() { return gate; }
+
     /** The port the server listens on (the configured one, or the one picked for port 0). */
     public int boundPort() {
         Channel ch = serverChannel;

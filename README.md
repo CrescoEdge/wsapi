@@ -235,9 +235,19 @@ the agent's tenant from the controller; until the controller knows it, every cli
 | `wsapi_api_max_message_bytes` | 67108864 (64 MiB) | largest API-socket message; room for a plugin jar upload (base64, about 4/3 of the jar) |
 | `wsapi_logstreamer_max_message_bytes` | 65536 (64 KiB) | largest log-stream message (configuration lines) |
 | `wsapi_dataplane_max_message_bytes` | 67108864 (64 MiB) | largest dataplane message |
+| `wsapi_max_inflight_bytes_per_user` | 268435456 (256 MiB) | inbound message bytes one caller's connections may hold together (at least the largest message cap) |
+| `wsapi_max_inflight_bytes` | half of Netty's direct memory, 256 MiB to 2 GiB | inbound message bytes all connections may hold together |
 
 A message over its endpoint's cap, in one frame or in fragments, closes the connection with WebSocket status 1009
 (message too big), its reason naming the setting. Every endpoint used to accept 1 GiB, buffered whole per connection.
+
+The inbound message bytes wsapi holds while messages arrive are bounded too: per caller, all its connections together
+(`wsapi_max_inflight_bytes_per_user`, 256 MiB, raised with a WARNING to the largest message cap if set below it), and
+for everyone together (`wsapi_max_inflight_bytes`). Bytes are counted as they arrive and given back once a whole message
+has been handled. A connection whose next bytes would exceed either bound is closed with WebSocket status 1013 (try
+again later), its reason naming the setting; the caller's other connections are not affected. One user with 30
+connections each sending a 60 MiB frame used to hold 1.8 GB. `wsapi.inbound.inflight.bytes` shows what is held now and
+`wsapi.inbound.budget.closed` counts the closed connections; the bounds are logged at start.
 
 ### The dataplane
 

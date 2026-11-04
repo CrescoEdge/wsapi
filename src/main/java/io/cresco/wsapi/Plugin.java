@@ -209,6 +209,22 @@ public class Plugin implements PluginService {
                         // every open connection's credential is checked again this often: a revoked token, a removed
                         // user, a changed password or role closes the connections it opened (1008)
                         .revocationCheckMs(cfg.getLongParam("wsapi_revocation_check_ms", 1000L));
+                // inbound message bytes held in memory: per caller (all its connections) and in total
+                long largest = WsRouter.largestMessageCap(pluginBuilder);
+                long perCaller = cfg.getLongParam("wsapi_max_inflight_bytes_per_user", io.cresco.wsapi.netty.InboundBudget.DEFAULT_PER_CALLER);
+                long totalInflight = cfg.getLongParam("wsapi_max_inflight_bytes", io.cresco.wsapi.netty.InboundBudget.defaultTotal());
+                if (perCaller < largest) {
+                    logger.warn("wsapi: wsapi_max_inflight_bytes_per_user=" + perCaller + " is below the largest message cap ("
+                            + largest + " bytes); using " + largest + " so one message always fits");
+                    perCaller = largest;
+                }
+                if (totalInflight < perCaller) {
+                    logger.warn("wsapi: wsapi_max_inflight_bytes=" + totalInflight + " is below the per-user bound; using " + perCaller);
+                    totalInflight = perCaller;
+                }
+                gate.inboundBounds(perCaller, totalInflight);
+                logger.info("wsapi inbound message bytes in flight: at most " + gate.inbound().perCaller() + " per user, "
+                        + gate.inbound().total() + " in total");
 
                 // --- Netty WebSocket server (replaces Jetty). One wss listener serves all three
                 //     endpoints; every upgrade authenticated; permessage-deflate off; whole-message frame aggregation. ---
