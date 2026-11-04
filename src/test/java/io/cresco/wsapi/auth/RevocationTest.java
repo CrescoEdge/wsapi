@@ -252,6 +252,24 @@ class RevocationTest {
     }
 
     @Test
+    void credentialToolChangesARoleInPlace() throws Exception {
+        Path f = Files.createTempDirectory("wsapi-role").resolve("ws.users");
+        java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream(), be = new java.io.ByteArrayOutputStream();
+        java.io.PrintStream o = new java.io.PrintStream(bo), e = new java.io.PrintStream(be);
+        CredentialTool.PasswordSource pw = prompt -> "carol-Password-z8y7".toCharArray();
+        assertEquals(0, CredentialTool.run(new String[]{"add", f.toString(), "carol", "tenant-a", "user"}, o, e, pw));
+        assertEquals(0, CredentialTool.run(new String[]{"grant", f.toString(), "carol", "job-1"}, o, e, pw));
+        CredentialStore before = CredentialStore.parse(Files.readString(f), "f");
+        assertEquals(0, CredentialTool.run(new String[]{"role", f.toString(), "carol", "admin"}, o, e, pw));
+        CredentialStore after = CredentialStore.parse(Files.readString(f), "f");
+        assertEquals("admin", after.get("carol").role);
+        assertEquals(List.of("job-1"), after.get("carol").grants, "grants kept");
+        assertTrue(after.get("carol").hash.sameAs(before.get("carol").hash), "password kept");
+        assertEquals(1, CredentialTool.run(new String[]{"role", f.toString(), "carol", "root"}, o, e, pw), "admin or user only");
+        assertEquals(1, CredentialTool.run(new String[]{"role", f.toString(), "nobody", "user"}, o, e, pw));
+    }
+
+    @Test
     void anUnchangedCredentialIsNeverClosedByUnrelatedChanges() throws Exception {
         Client alice = new Client();
         WebSocket aliceWs = openWs(alice, "Authorization", basic("alice", "alice-Password-k3v9"));
