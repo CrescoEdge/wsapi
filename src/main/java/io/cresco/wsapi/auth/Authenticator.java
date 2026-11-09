@@ -632,7 +632,8 @@ public final class Authenticator {
             why = serviceKeyRevocation(c);
         } else if (c.kind == Credential.Kind.CERTIFICATE) {
             ClientCertificates certs = clientCertificates;
-            why = certs == null ? "client certificates are no longer accepted" : certs.revoked(c.certificate);
+            // per message: the fingerprint taken at login, not a SHA-256 of the certificate each time
+            why = certs == null ? "client certificates are no longer accepted" : certs.revoked(c.certificate, c.certFingerprint);
         } else {
             CredentialStore s = store.get();
             if (s == null) s = CredentialStore.empty();

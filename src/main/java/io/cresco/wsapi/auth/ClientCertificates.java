@@ -130,9 +130,7 @@ public final class ClientCertificates {
     /** The SHA-256 fingerprint of a certificate (lowercase hex). */
     public static String fingerprint(X509Certificate c) {
         try {
-            StringBuilder sb = new StringBuilder();
-            for (byte b : MessageDigest.getInstance("SHA-256").digest(c.getEncoded())) sb.append(String.format("%02x", b & 0xff));
-            return sb.toString();
+            return java.util.HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(c.getEncoded()));
         } catch (Exception e) {
             throw new IllegalStateException(e);
         }
@@ -177,9 +175,14 @@ public final class ClientCertificates {
 
     /** Why this certificate is not accepted now (revoked, expired, or revocation cannot be checked), or null. */
     public String revoked(X509Certificate c) {
+        return revoked(c, fingerprint(c));
+    }
+
+    /** As {@link #revoked(X509Certificate)}, with the certificate's SHA-256 fingerprint already known ({@code fp}). */
+    public String revoked(X509Certificate c, String fp) {
         Revocation r = revocation();
         if (r.problem != null) return "client certificates cannot be checked for revocation: " + r.problem;
-        String fp = fingerprint(c);
+        if (fp == null) fp = fingerprint(c);
         if (r.denied.contains(fp)) return "its client certificate sha256:" + fp + " is on the deny list (wsapi_client_deny_file)";
         for (X509CRL crl : r.crls) {
             if (crl.getIssuerX500Principal().equals(c.getIssuerX500Principal()) && crl.isRevoked(c)) {
