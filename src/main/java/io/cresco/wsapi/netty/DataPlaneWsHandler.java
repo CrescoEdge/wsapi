@@ -68,6 +68,31 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
     private final Authenticator.Principal principal;
     private final WsRouter.Gate gate;
 
+    // Backpressure (egress): a consumer past its budget makes its listener wait (a paced listener, on a JMS session of
+    // its own) instead of losing frames; what it has not taken stays at the broker, which slows the stream's writers.
+    /** Waits: a WS consumer fell more than its budget behind and its stream was held at the broker. */
+    public static final java.util.concurrent.atomic.AtomicLong EGRESS_PAUSES = new java.util.concurrent.atomic.AtomicLong();
+    /** WS consumers closed because, held, they read nothing for wsapi_dataplane_stall_close_ms. */
+    public static final java.util.concurrent.atomic.AtomicLong EGRESS_STALLED = new java.util.concurrent.atomic.AtomicLong();
+    /** Client frames the dataplane did not take (no session, controller not active): logged, never silent. */
+    public static final java.util.concurrent.atomic.AtomicLong INGRESS_FAILED = new java.util.concurrent.atomic.AtomicLong();
+    /** Woken whenever a frame's write completes, while the listener waits for its consumer to drain. */
+    private final Object drained = new Object();
+    private volatile boolean waiting;
+    private volatile long lastDrainMs;
+    private final long stallCloseMs;
+    /** wsapi_dataplane_backpressure (default true): wait for a consumer past its budget; false: drop past it, counted. */
+    private final boolean paced;
+
+    // Backpressure (ingress): client frames are published off the event loop -- a send waits when the topic is full
+    // (producer flow control), and the event loop also serves other connections -- and reading pauses while too many
+    // bytes wait to be published, so the client's TCP window, not wsapi's memory, takes the wait.
+    private final int sendThreads;
+    private final long ingressHigh;
+    private final java.util.concurrent.atomic.AtomicLong ingressQueued = new java.util.concurrent.atomic.AtomicLong();
+    private io.netty.util.concurrent.EventExecutor sendExec;
+    private final java.util.concurrent.atomic.AtomicLong lastIngressFailLogMs = new java.util.concurrent.atomic.AtomicLong();
+
     public DataPlaneWsHandler(PluginBuilder plugin, Authenticator.Principal principal, WsRouter.Gate gate) {
         this.plugin = plugin;
         this.principal = principal;
@@ -76,13 +101,32 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
         this.egressCap = plugin.getConfig().getLongParam("wsapi_dataplane_egress_buffer_bytes", 32L * 1024 * 1024);
         this.egress = new EgressBudget(egressCap,
                 plugin.getConfig().getLongParam("wsapi_dataplane_egress_global_bytes", EgressBudget.defaultGlobalCap()));
+        this.stallCloseMs = Math.max(1000L, plugin.getConfig().getLongParam("wsapi_dataplane_stall_close_ms", 30_000L));
+        this.paced = plugin.getConfig().getBooleanParam("wsapi_dataplane_backpressure", true);
+        this.sendThreads = Math.max(0, plugin.getConfig().getIntegerParam("wsapi_dataplane_send_threads", DataPlaneSends.defaultThreads()));
+        this.ingressHigh = Math.max(1L << 20, plugin.getConfig().getLongParam("wsapi_dataplane_ingress_queue_bytes", 16L << 20));
     }
 
-    /** Queues a frame to the consumer within its backlog budget; drops (counted, logged) past it. */
+    /**
+     * Queues a frame to the consumer. Past its backlog budget the listener waits (it has a JMS session of its own): the
+     * rest of the stream waits at the broker, which slows the stream's writers (nothing is lost), until the backlog is
+     * back to half the budget. With wsapi_dataplane_backpressure=false frames past the budget are dropped instead, each
+     * counted and logged.
+     */
     private void deliver(Channel ch, WebSocketFrame frame) {
         final long size = frame.content().readableBytes();
         if (!ch.isActive()) {                 // consumer gone; its listener is being removed
             frame.release();
+            return;
+        }
+        if (paced) {
+            egress.add(size);
+            ch.writeAndFlush(frame).addListener(f -> {
+                egress.release(size);
+                lastDrainMs = System.currentTimeMillis();
+                if (waiting) synchronized (drained) { drained.notifyAll(); }
+            });
+            if (egress.over()) awaitDrain(ch);
             return;
         }
         if (!egress.tryAcquire(size)) {
@@ -97,6 +141,98 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
             return;
         }
         ch.writeAndFlush(frame).addListener(f -> egress.release(size));
+    }
+
+    /**
+     * The consumer is past its budget: wait, on this listener's own JMS session, until its backlog is back to half the
+     * budget. Meanwhile its messages stay at the broker (prefetch, then the topic), whose flow control slows their writers.
+     * A consumer that drains nothing for wsapi_dataplane_stall_close_ms while frames wait for it is closed: a reader that
+     * stopped would otherwise hold its stream's writers -- all writers of the topic on that broker, once the topic's
+     * memory is full -- for as long as it stays connected.
+     */
+    private void awaitDrain(Channel ch) {
+        EGRESS_PAUSES.incrementAndGet();
+        long since = System.currentTimeMillis();
+        waiting = true;
+        try {
+            synchronized (drained) {
+                while (ch.isActive() && !egress.drained()) {
+                    long now = System.currentTimeMillis();
+                    if (egress.pending() > 0 && now - Math.max(since, lastDrainMs) > stallCloseMs) {
+                        closeStalled(ch);
+                        return;
+                    }
+                    drained.wait(50);
+                }
+            }
+        } catch (InterruptedException closing) {
+            Thread.currentThread().interrupt();
+        } finally {
+            waiting = false;
+        }
+    }
+
+    private void closeStalled(Channel ch) {
+        EGRESS_STALLED.incrementAndGet();
+        logger.warn("DataPlaneWsHandler: closing a dataplane consumer that read nothing for " + stallCloseMs + " ms with "
+                + egress.pending() + " B waiting (wsapi_dataplane_stall_close_ms): its stream was held at the broker,"
+                + " slowing its writers (wsapi.dataplane.egress.stalled total=" + EGRESS_STALLED.get() + ")");
+        ch.writeAndFlush(new io.netty.handler.codec.http.websocketx.CloseWebSocketFrame(1013, "stalled: nothing read in "
+                + stallCloseMs + " ms")).addListener(io.netty.channel.ChannelFutureListener.CLOSE);
+        // a client that does not read does not read the close frame either
+        try {
+            ch.eventLoop().schedule(() -> { ch.close(); }, 2, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (java.util.concurrent.RejectedExecutionException stopping) {
+            ch.close();
+        }
+    }
+
+    /**
+     * Publish a client frame: inline, or on this connection's send thread with reading paused while more than
+     * wsapi_dataplane_ingress_queue_bytes wait (order is kept: one connection, one send thread).
+     */
+    private void publish(Channel ch, Message m, long bytes) {
+        if (sendThreads > 0 && sendExec == null) sendExec = DataPlaneSends.next(sendThreads);
+        io.netty.util.concurrent.EventExecutor exec = sendExec;
+        if (exec == null) {
+            send(m);
+            return;
+        }
+        if (ingressQueued.addAndGet(bytes) > ingressHigh && ch.config().isAutoRead()) ch.config().setAutoRead(false);
+        try {
+            exec.execute(() -> {
+                try {
+                    send(m);
+                } finally {
+                    if (ingressQueued.addAndGet(-bytes) <= ingressHigh / 2 && !ch.config().isAutoRead()) {
+                        ch.eventLoop().execute(() -> {
+                            if (ingressQueued.get() <= ingressHigh / 2 && ch.isActive()) ch.config().setAutoRead(true);
+                        });
+                    }
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException stopping) {
+            ingressQueued.addAndGet(-bytes);
+            send(m);
+        }
+    }
+
+    private void send(Message m) {
+        boolean ok;
+        try {
+            ok = plugin.getAgentService().getDataPlaneService().sendMessage(
+                    TopicType.GLOBAL, m, jakarta.jms.DeliveryMode.NON_PERSISTENT, 0, 0, shard);
+        } catch (RuntimeException e) {
+            ok = false;
+        }
+        if (!ok) {
+            long n = INGRESS_FAILED.incrementAndGet();
+            long now = System.currentTimeMillis(), prev = lastIngressFailLogMs.get();
+            if (now - prev >= 5000 && lastIngressFailLogMs.compareAndSet(prev, now)) {
+                logger.error("DataPlaneWsHandler: the dataplane did not take a client frame (no session, or the controller is"
+                        + " not active); wsapi.dataplane.ingress.failed total=" + n);
+            }
+        }
     }
 
     @Override
@@ -130,8 +266,7 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
                     TextMessage tm = plugin.getAgentService().getDataPlaneService().createTextMessage();
                     tm.setText(message);
                     route(tm);
-                    plugin.getAgentService().getDataPlaneService().sendMessage(
-                            TopicType.GLOBAL, tm, jakarta.jms.DeliveryMode.NON_PERSISTENT, 0, 0, shard);
+                    publish(ctx.channel(), tm, utf8Bytes((TextWebSocketFrame) frame));
                 }
             } else if (frame instanceof BinaryWebSocketFrame) {
                 if (!active || streamInfo.getIdentKey() == null) return; // no data before the handshake; selector sessions only receive
@@ -144,8 +279,7 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
                 bm.setIntProperty("dp_bytes", b.length); // readable payload size for link throughput metrics
                 DATAPLANE_BYTES.addAndGet(b.length);
                 DATAPLANE_MESSAGES.incrementAndGet();
-                plugin.getAgentService().getDataPlaneService().sendMessage(
-                        TopicType.GLOBAL, bm, jakarta.jms.DeliveryMode.NON_PERSISTENT, 0, 0, shard);
+                publish(ctx.channel(), bm, b.length);
             }
         } catch (Exception ex) {
             logger.error("DataPlaneWsHandler.channelRead0: " + ex.getMessage());
@@ -359,6 +493,12 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
      */
     interface RefusalAwareListener extends MessageListener, jakarta.jms.ExceptionListener { }
 
+    /**
+     * A dataplane consumer's listener: told of a refused subscription, and paced -- it waits in onMessage while its client
+     * is more than its budget behind, so the controller gives it a JMS session of its own.
+     */
+    interface ConsumerListener extends RefusalAwareListener, io.cresco.library.data.PacedListener { }
+
     /** Close a client's stream because its subscription was refused: WebSocket close 1008 (policy violation) with the reason. */
     static void closeRefused(Channel ch, String reason) {
         String r = "Subscription refused: " + (reason == null ? "" : reason);
@@ -402,7 +542,7 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
     private boolean createListener(ChannelHandlerContext ctx, StreamInfo si, String streamQuery) {
         try {
             final Channel ch = ctx.channel();
-            MessageListener ml = new RefusalAwareListener() {
+            MessageListener ml = new ConsumerListener() {
                 @Override
                 public void onException(jakarta.jms.JMSException refused) {
                     // the controller could not restore this subscription after a reconnect (the broker refused it):
@@ -414,13 +554,12 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
                 @Override
                 public void onMessage(Message msg) {
                     try {
-                        // EGRESS: the JMS session is shared with every other dataplane listener on this
-                        // agent, so this never blocks. Frames used to be dropped as soon as the channel
-                        // passed its 2 MiB write high-water mark, i.e. eight 256 KiB frames: a burst that
-                        // outran the consumer by a few milliseconds lost frames (2026-09-26, 2-node, 800 x
-                        // 256 KiB: 4 of 70 runs lost 1-8 frames, mostly the first run after a cold start).
-                        // Now they queue within a per-consumer byte budget (EgressBudget) and only an
-                        // overloaded consumer loses frames, each one counted.
+                        // EGRESS. Frames used to be dropped as soon as the channel passed its 2 MiB write
+                        // high-water mark (eight 256 KiB frames: a burst a few milliseconds ahead of the consumer lost
+                        // frames), then past a per-consumer byte budget (EgressBudget; smoke 1993/2000 behind an agent,
+                        // DGX 1908/2000). Now, past the budget, this listener WAITS for its consumer -- on a JMS session
+                        // of its own (ConsumerListener is paced), so no other listener of the agent waits with it -- and
+                        // its stream backs up into the broker, whose flow control slows the writers: nothing is lost.
                         if (envelope) {
                             if (msg instanceof TextMessage || msg instanceof jakarta.jms.MapMessage || DataPlaneFrames.isTransferEnd(msg)) {
                                 deliver(ch, new TextWebSocketFrame(Unpooled.copiedBuffer(DataPlaneFrames.envelopeJson(msg),

@@ -9,10 +9,12 @@ import java.util.concurrent.atomic.AtomicLong;
  * pooled JMS session, so waiting on one slow consumer would pace every other stream on the agent (stunnel,
  * other clients) to it. Instead frames queue on the consumer's channel up to a byte budget, far past Netty's
  * write high-water mark (2 MiB, i.e. eight 256 KiB frames, which a burst crosses in a few milliseconds of
- * consumer jitter). Only a consumer more than {@code channelCap} bytes behind, or all consumers together more
- * than {@code globalCap}, is overloaded: its frames are then dropped, and every drop is counted
- * ({@link #DROPPED}, wsapi.dataplane.egress.dropped) and logged by the caller. Both caps bound memory the way
- * the old high-water-mark shedding did (a stalled consumer once grew the outbound buffer without bound).
+ * consumer jitter). A consumer more than {@code channelCap} bytes behind, or all consumers together more
+ * than {@code globalCap}, is overloaded: its listener waits ({@link #add}, {@link #over}, {@link #drained}) on a JMS
+ * session of its own, so the rest of its stream waits at the broker, which slows the stream's writers -- backpressure,
+ * nothing lost. With backpressure off its frames are dropped past the cap instead ({@link #tryAcquire}), every drop
+ * counted ({@link #DROPPED}, wsapi.dataplane.egress.dropped) and logged by the caller. Both caps bound memory the
+ * way the old high-water-mark shedding did (a stalled consumer once grew the outbound buffer without bound).
  *
  * <p>Single-writer per instance (one JMS session thread delivers a listener's messages); {@link #release}
  * runs on the channel's event loop when a write completes or fails.
@@ -57,6 +59,27 @@ final class EgressBudget {
         long m;
         while (now > (m = MAX_PENDING.get()) && !MAX_PENDING.compareAndSet(m, now)) { }
         return true;
+    }
+
+    /**
+     * Backpressure: the frame always queues; the caller's listener waits when {@link #over} until {@link #drained}. The
+     * backlog then stays within the cap plus one frame.
+     */
+    void add(long bytes) {
+        long now = pending.addAndGet(bytes);
+        GLOBAL_PENDING.addAndGet(bytes);
+        long m;
+        while (now > (m = MAX_PENDING.get()) && !MAX_PENDING.compareAndSet(m, now)) { }
+    }
+
+    /** This consumer is more than its cap behind, or all consumers together more than theirs: its listener waits. */
+    boolean over() {
+        return pending.get() > channelCap || GLOBAL_PENDING.get() > globalCap;
+    }
+
+    /** Back to half its cap, with the process under 90% of its own: a waiting listener goes on. */
+    boolean drained() {
+        return pending.get() <= channelCap / 2 && GLOBAL_PENDING.get() <= globalCap - globalCap / 10;
     }
 
     /** The frame's write completed (or failed, e.g. the channel closed): its bytes leave the backlog. */
