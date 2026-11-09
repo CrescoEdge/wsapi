@@ -42,18 +42,20 @@ public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFra
     // or issue one request at a time.
     static final int RPC_THREADS = 128;
     static final int RPC_QUEUE = 512;
+    // One thread per RPC in flight, at most RPC_THREADS + RPC_QUEUE of them (an RPC mostly waits for its reply, so a thread
+    // per RPC is the same bound as 128 running and 512 queued), handed over through a SynchronousQueue: an idle thread
+    // takes the next RPC at once, the most recently idle first. The fixed 128-thread pool with a FIFO queue made a new
+    // thread for each of the first 128 RPCs and woke a different, cold, thread for every later one (about 0.1 ms of every
+    // serial call). Full: refused at once ("busy"), never run on the event loop.
     private static final ThreadPoolExecutor RPC_POOL = new ThreadPoolExecutor(
-            RPC_THREADS, RPC_THREADS, 60L, TimeUnit.SECONDS,
-            new java.util.concurrent.ArrayBlockingQueue<>(RPC_QUEUE),
+            0, RPC_THREADS + RPC_QUEUE, 60L, TimeUnit.SECONDS,
+            new java.util.concurrent.SynchronousQueue<>(),
             r -> {
                 Thread t = new Thread(r, "wsapi-apisocket-rpc");
                 t.setDaemon(true);
                 return t;
             },
             new ThreadPoolExecutor.AbortPolicy());
-    static {
-        RPC_POOL.allowCoreThreadTimeOut(true);
-    }
 
     /** RPCs each caller has in flight (all of the caller's connections together). */
     static final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger> IN_FLIGHT =
