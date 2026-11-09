@@ -70,7 +70,10 @@ final class DataPlaneFrames {
 
     static final String CALLER = "cresco_caller", CALLER_TENANT = "cresco_caller_tenant", CALLER_ROLES = "cresco_caller_roles";
 
-    /** The envelope fields of a message: its writer and its properties (no JMS* headers). */
+    /**
+     * The envelope fields of a message: its writer and its properties -- no JMS* headers, and none of infrastructure's
+     * {@code cresco_*} properties but the stream's {@code cresco_seq}/{@code cresco_gap} ({@link InternalParams}).
+     */
     static Map<String, Object> envelope(String kind, Message msg) throws JMSException {
         Map<String, Object> e = new LinkedHashMap<>();
         e.put("kind", kind);
@@ -95,7 +98,7 @@ final class DataPlaneFrames {
         Enumeration<String> names = msg.getPropertyNames();
         while (names.hasMoreElements()) {
             String n = names.nextElement();
-            if (n.startsWith("JMS")) continue;
+            if (InternalParams.internalProperty(n)) continue;  // JMS headers, infrastructure's cresco_* (not the stream's seq/gap)
             Object v = msg.getObjectProperty(n);
             props.put(n, v instanceof Character ? String.valueOf(v) : v);
         }
