@@ -5,9 +5,9 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * Bounded egress backlog for one dataplane WebSocket consumer.
  *
- * <p>The JMS listener that feeds a consumer never blocks: every dataplane listener on an agent shares one
- * pooled JMS session, so waiting on one slow consumer would pace every other stream on the agent (stunnel,
- * other clients) to it. Instead frames queue on the consumer's channel up to a byte budget, far past Netty's
+ * <p>Each consumer's JMS listener has a JMS session of its own (with one shared session, waiting on one slow consumer
+ * would pace every other stream on the agent -- stunnel, other clients -- to it). Frames queue on the consumer's
+ * channel up to a byte budget, far past Netty's
  * write high-water mark (2 MiB, i.e. eight 256 KiB frames, which a burst crosses in a few milliseconds of
  * consumer jitter). A consumer more than {@code channelCap} bytes behind, or all consumers together more
  * than {@code globalCap}, is overloaded: its listener waits ({@link #add}, {@link #over}, {@link #drained}) on a JMS
