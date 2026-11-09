@@ -66,6 +66,9 @@ public class PluginExecutor implements Executor {
                 metricEngine.setGauge("wsapi.inbound.budget.closed", "connections closed (1013) because a caller or everyone had too many message bytes in flight, since start", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
                 metricEngine.setGauge("wsapi.auth.revoked.connections", "open connections closed because their credential was revoked or changed, since start", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
                 metricEngine.setGauge("wsapi.dataplane.egress.max.pending.bytes", "largest egress backlog one WS consumer reached since start (bytes)", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
+                metricEngine.setGauge("wsapi.dataplane.egress.paused", "times a WS consumer more than its budget behind had its stream held at the broker (backpressure: its writers slowed, nothing lost), since start", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
+                metricEngine.setGauge("wsapi.dataplane.egress.stalled", "WS consumers closed (1013) because, held, they read nothing for wsapi_dataplane_stall_close_ms, since start", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
+                metricEngine.setGauge("wsapi.dataplane.ingress.failed", "client dataplane frames the controller did not take (no session, controller not active), since start", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
             }
             metricEngine.updateIntGauge("wsapi.dataplane.connections", DataPlaneWsHandler.ACTIVE_CONNECTIONS.get());
             metricEngine.updateLongGauge("wsapi.dataplane.bytes", DataPlaneWsHandler.DATAPLANE_BYTES.get());
@@ -73,6 +76,9 @@ public class PluginExecutor implements Executor {
             metricEngine.updateLongGauge("wsapi.dataplane.egress.dropped", DataPlaneWsHandler.EGRESS_DROPPED.get());
             metricEngine.updateLongGauge("wsapi.dataplane.egress.pending.bytes", DataPlaneWsHandler.EGRESS_PENDING_BYTES.get());
             metricEngine.updateLongGauge("wsapi.dataplane.egress.max.pending.bytes", DataPlaneWsHandler.EGRESS_MAX_PENDING_BYTES.get());
+            metricEngine.updateLongGauge("wsapi.dataplane.egress.paused", DataPlaneWsHandler.EGRESS_PAUSES.get());
+            metricEngine.updateLongGauge("wsapi.dataplane.egress.stalled", DataPlaneWsHandler.EGRESS_STALLED.get());
+            metricEngine.updateLongGauge("wsapi.dataplane.ingress.failed", DataPlaneWsHandler.INGRESS_FAILED.get());
             metricEngine.updateLongGauge("wsapi.auth.failures", io.cresco.wsapi.auth.AuthRateLimiter.FAILURES.get());
             metricEngine.updateLongGauge("wsapi.auth.servicekey.failures", io.cresco.wsapi.auth.AuthRateLimiter.SERVICE_KEY_FAILURES.get());
             metricEngine.updateLongGauge("wsapi.auth.refused", io.cresco.wsapi.auth.AuthRateLimiter.REFUSED.get());

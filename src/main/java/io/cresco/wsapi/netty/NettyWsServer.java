@@ -216,6 +216,7 @@ public class NettyWsServer {
         try { if (serverChannel != null) serverChannel.close().sync(); } catch (Exception ignore) {}
         if (bossGroup != null) bossGroup.shutdownGracefully();
         if (workerGroup != null) workerGroup.shutdownGracefully();
+        DataPlaneSends.shutdown();
         if (gate != null) gate.shutdown();
         logger.info("wsapi Netty WebSocket server stopped");
     }

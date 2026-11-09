@@ -50,9 +50,6 @@ class ReviewApiDataplaneTest {
     }
 
     static PluginBuilder plugin(Recorder rec) throws Exception {
-        Path dir = Files.createTempDirectory("wsapi-review-dp");
-        List<String> log = Collections.synchronizedList(new ArrayList<>());
-        CLogger logger = TestSupport.logger(log);
         DataPlaneService dps = (DataPlaneService) Proxy.newProxyInstance(DataPlaneService.class.getClassLoader(),
                 new Class[]{DataPlaneService.class}, (proxy, m, args) -> {
                     switch (m.getName()) {
@@ -71,6 +68,16 @@ class ReviewApiDataplaneTest {
                         default: return m.getReturnType() == boolean.class ? false : null;
                     }
                 });
+        // client frames are published inline, so a test sees them in rec.sent as soon as writeInbound returns (wsapi
+        // publishes them on its send threads; DataPlaneBackpressureTest covers that)
+        return plugin(dps, Map.of("wsapi_dataplane_send_threads", "0"));
+    }
+
+    /** A wsapi plugin over {@code dps}, with {@code extra} configuration. */
+    static PluginBuilder plugin(DataPlaneService dps, Map<String, Object> extra) throws Exception {
+        Path dir = Files.createTempDirectory("wsapi-review-dp");
+        List<String> log = Collections.synchronizedList(new ArrayList<>());
+        CLogger logger = TestSupport.logger(log);
         ControllerState cs = (ControllerState) Proxy.newProxyInstance(ControllerState.class.getClassLoader(),
                 new Class[]{ControllerState.class}, (proxy, m, args) -> {
                     switch (m.getName()) {
@@ -99,6 +106,7 @@ class ReviewApiDataplaneTest {
                 });
         Map<String, Object> config = new HashMap<>();
         config.put("pluginID", "plugin/9");
+        config.putAll(extra);
         return new PluginBuilder(as, "io.cresco.wsapi.Plugin", null, config);
     }
 

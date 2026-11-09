@@ -65,4 +65,21 @@ class EgressBudgetTest {
         long d = EgressBudget.defaultGlobalCap();
         assertTrue(d > 0 && d <= 512 * MIB && d <= Runtime.getRuntime().maxMemory() / 4, String.valueOf(d));
     }
+
+    @Test
+    void underBackpressureEveryFrameQueuesAndTheListenerWaitsBetweenTheCapAndHalfOfIt() {
+        long base = EgressBudget.GLOBAL_PENDING.get();
+        EgressBudget b = new EgressBudget(1 * MIB, base + 512 * MIB);
+        for (int i = 0; i < 4; i++) { b.add(FRAME); assertFalse(b.over(), "within 1 MiB after " + (i + 1)); }
+        b.add(FRAME);
+        assertTrue(b.over(), "1.25 MiB: the listener waits (the frame itself was queued, not dropped)");
+        assertFalse(b.drained());
+        b.release(FRAME); b.release(FRAME);
+        assertFalse(b.drained(), "768 KiB: still more than half the cap");
+        b.release(FRAME);
+        assertTrue(b.drained(), "512 KiB: the listener goes on");
+        b.release(FRAME); b.release(FRAME);
+        assertEquals(0, b.pending());
+        assertEquals(base, EgressBudget.GLOBAL_PENDING.get());
+    }
 }
