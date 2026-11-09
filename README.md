@@ -246,6 +246,16 @@ client's role, and every receiver authorizes the action against it (`@CrescoActi
 the agent's tenant from the controller; until the controller knows it, every client is refused (503). wsapi's own
 `nettuning` action requires `infra` or `admin`.
 
+**The fabric's own stamps stay inside the fabric.** A reply reaches the client without the parameters infrastructure
+writes on a message: the origin's end-to-end signature (`cresco_sig`, `cresco_sig_by`, `cresco_sig_ts`,
+`cresco_sig_cred` -- a node's certificate or attestation -- and `cresco_sig_caller*`), the broker's caller stamp
+(`cresco_caller*`, the alias included), the namespace tenant (`cresco_tenant`), the routers' annotations
+(`routepath-*`, `linkcost-*`, `srcroute*`) and the RPC plumbing (`callId-*`, `is_rpc`); a failed RPC's echo of the
+request likewise. Every other reply parameter, and the client's own `client_rpc_id`, is passed through. The same names
+(except `cresco_tenant`, the tenant an admin addresses, and `is_rpc`) are removed from what a client sends. A dataplane
+envelope frame's `properties` carry no `cresco_*` property but the stream's sequence numbers `cresco_seq` and
+`cresco_gap` (how a consumer sees a loss); its writer is in the envelope's `writer` fields.
+
 | Config key | Default | Meaning |
 |---|---|---|
 | `wsapi_port` | 8282 | wss listen port |

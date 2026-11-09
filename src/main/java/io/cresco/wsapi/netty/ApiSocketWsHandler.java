@@ -26,8 +26,9 @@ import java.util.concurrent.TimeUnit;
  * JSON) or fire-and-forget.
  *
  * <p>Before anything is sent: the reserved caller parameters ({@code cresco_caller}, {@code cresco_caller_tenant},
- * {@code cresco_caller_roles}) are removed from the client's payload (only the controller sets them), and a message
- * that names another tenant ({@code cresco_tenant}) is refused unless the client is an admin of a superuser tenant.
+ * {@code cresco_caller_roles}) and the other parameters only infrastructure writes ({@link InternalParams}) are removed
+ * from the client's payload, and a message that names another tenant ({@code cresco_tenant}) is refused unless the client
+ * is an admin of a superuser tenant. A reply reaches the client without the fabric's own stamps ({@link InternalParams}).
  */
 public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFrame> {
 
@@ -87,6 +88,7 @@ public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFra
         if (caller == null || auth == null) return "no authenticated caller";
         if (payload == null) return null;
         payload.keySet().removeIf(RESERVED_PARAMS::contains);
+        InternalParams.stripRequest(payload);              // signatures, routing annotations, RPC plumbing: infrastructure's
         String target = payload.get(TenantNamespace.TENANT_PARAM);
         if (target != null && !auth.mayTarget(caller, target)) {
             return caller + " may not address tenant " + target;
@@ -245,9 +247,12 @@ public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFra
         }
     }
 
-    /** A reply as sent to the client: its params, with any plugin config it carries redacted ({@link ReplyRedaction}). */
+    /**
+     * A reply as sent to the client: its params, with any plugin config it carries redacted ({@link ReplyRedaction}) and
+     * without the fabric's own stamps -- signatures, caller stamps, routing annotations, RPC plumbing ({@link InternalParams}).
+     */
     static String success(MsgEvent response) {
-        return gson.toJson(ReplyRedaction.redact(response).getParams());
+        return gson.toJson(InternalParams.reply(ReplyRedaction.redact(response).getParams()));
     }
 
     /**
@@ -257,7 +262,7 @@ public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFra
      * reply must fit a client frame and must not repeat a secret.
      */
     static String failure(Map<String, String> payload, String status, String desc) {
-        Map<String, String> r = FailureEcho.params(payload);
+        Map<String, String> r = InternalParams.reply(FailureEcho.params(payload));
         desc = FailureEcho.redactText(desc);
         if (desc != null && desc.length() > FailureEcho.MAX_VALUE_BYTES) desc = desc.substring(0, FailureEcho.MAX_VALUE_BYTES) + "...";
         r.put("status", status);
