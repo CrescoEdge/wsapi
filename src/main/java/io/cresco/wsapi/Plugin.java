@@ -188,8 +188,19 @@ public class Plugin implements PluginService {
                         .serviceKeyLimitsPerSource(cfg.getBooleanParam("wsapi_service_key_limits_per_source", true));
                 int authThreads = cfg.getIntegerParam("wsapi_auth_threads",
                         Math.max(2, Math.min(8, Runtime.getRuntime().availableProcessors() / 2)));
-                boolean production = io.cresco.wsapi.auth.SecurityProfile.isProduction(
-                        cfg.getStringParam(io.cresco.wsapi.auth.SecurityProfile.SETTING));
+                // the node's profile is the controller's answer (PluginBuilder.getSecurityProfile, PRODUCTION when it cannot be
+                // asked); a security_profile in wsapi's own configuration that says otherwise is a conflict: wsapi does not start
+                io.cresco.library.security.SecurityProfile nodeProfile = pluginBuilder.getSecurityProfile();
+                String conflict = io.cresco.wsapi.auth.SecurityProfile.conflict(
+                        cfg.getStringParam(io.cresco.wsapi.auth.SecurityProfile.SETTING), nodeProfile);
+                if (conflict != null) {
+                    logger.error("wsapi NOT started: " + conflict);
+                    pluginBuilder.setIsActive(false);
+                    return false;
+                }
+                boolean production = nodeProfile == io.cresco.library.security.SecurityProfile.PRODUCTION;
+                // checked again at every login: a node that answers production to a wsapi that did not start in it is refused
+                authenticator.nodeProfile(() -> pluginBuilder.getSecurityProfile() == io.cresco.library.security.SecurityProfile.PRODUCTION);
                 if (production) {
                     // security_profile=production: client certificates only; refuse to start without what that needs
                     io.cresco.wsapi.auth.SecurityProfile.Production prod = io.cresco.wsapi.auth.SecurityProfile.check(

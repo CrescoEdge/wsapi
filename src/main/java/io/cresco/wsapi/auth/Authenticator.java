@@ -303,6 +303,10 @@ public final class Authenticator {
         }
         ClientCertificates certs = clientCertificates;
         if (certs != null) return production(certs, authorization, serviceKeyHeader, source, clientCert, tenant);
+        if (nodeProduction.getAsBoolean()) {
+            return Result.fail(503, "wsapi is not serving: this node runs security_profile=production and wsapi did not start in it "
+                    + "(restart wsapi)", "node profile production, wsapi not in production", null);
+        }
         if (authorization != null && authorization.regionMatches(true, 0, "Bearer ", 0, 7)) {
             return token(authorization.substring(7).trim(), source, tenant);
         }
@@ -447,6 +451,17 @@ public final class Authenticator {
 
     /** True in the production profile (client certificates only). */
     public boolean production() { return clientCertificates != null; }
+
+    private volatile java.util.function.BooleanSupplier nodeProduction = () -> false;
+
+    /**
+     * Whether the node (its controller) runs the production profile now, asked at every login: a wsapi that did not start in
+     * production refuses every login while its node answers production (fail closed).
+     */
+    public Authenticator nodeProfile(java.util.function.BooleanSupplier productionNow) {
+        this.nodeProduction = productionNow == null ? () -> false : productionNow;
+        return this;
+    }
 
     /** The client certificates of the production profile, or null. */
     public ClientCertificates clientCertificates() { return clientCertificates; }

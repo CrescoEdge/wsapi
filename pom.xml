@@ -48,7 +48,10 @@
         <jetty.version>12.1.10</jetty.version>
         <!-- Netty WebSocket transport (replacing Jetty). -->
         <netty.version>4.2.19.Final</netty.version>
-        <bouncycastle.version>1.85</bouncycastle.version>
+        <!-- the agent's crypto/ modules (agent pom); keep these the versions the agent carries -->
+        <bcfips.version>2.1.3</bcfips.version>
+        <bcpkix-fips.version>2.1.13</bcpkix-fips.version>
+        <bcutil-fips.version>2.1.8</bcutil-fips.version>
     </properties>
 
     <dependencies>
@@ -102,13 +105,27 @@
             <scope>provided</scope>
         </dependency>
 
-        <!-- Self-signed TLS keystore/cert generation for the wss connector (mints the
-             identity-carrying cert). bcpkix (Java 8+ "jdk18on" build) pulls bcprov + bcutil
-             transitively; the JDK has no public API to create an X.509 cert. -->
+        <!-- Self-signed TLS keystore/cert generation for the wss connector (mints the identity-carrying cert; the JDK has no
+             public API to create an X.509 cert): Bouncy Castle FIPS (BC-FJA, FIPS 140-3, CMVP #4943). provided: never
+             embedded. A FIPS module checks its own jar, so the agent carries the unmodified jars on the JVM class path
+             (agent CryptoBoot) and the system bundle exports their packages, which this bundle imports (required). -->
         <dependency>
             <groupId>org.bouncycastle</groupId>
-            <artifactId>bcpkix-jdk18on</artifactId>
-            <version>${bouncycastle.version}</version>
+            <artifactId>bc-fips</artifactId>
+            <version>${bcfips.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcpkix-fips</artifactId>
+            <version>${bcpkix-fips.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcutil-fips</artifactId>
+            <version>${bcutil-fips.version}</version>
+            <scope>provided</scope>
         </dependency>
 
         <!-- Netty WebSocket server (replaces Jetty 12). netty-codec-http = HTTP/1.1 + WebSocket
@@ -193,16 +210,18 @@
                         <Bundle-Version>${project.version}-${maven.build.timestamp}</Bundle-Version>
                         <!-- Real BundleActivator: sets JVM system properties at start. -->
                         <Bundle-Activator>io.cresco.wsapi.Activator</Bundle-Activator>
-                        <!-- Cresco SPI + framework + Config Admin are hard requirements; embedded Jetty/BC stay optional. -->
+                        <!-- Cresco SPI + framework + Config Admin and Bouncy Castle FIPS (exported by the agent) are hard
+                             requirements; the rest of the embedded runtime stays optional. -->
                         <Import-Package>
                             org.osgi.framework,
                             org.osgi.framework.*,
                             org.osgi.service.cm,
                             io.cresco.library.*,
+                            org.bouncycastle.*;version="[2.1,3)",
                             *;resolution:=optional
                         </Import-Package>
                         <!-- Self-contained: embed the full Jetty 12 closure + jakarta.servlet/websocket
-                             + BouncyCastle. Embed-Transitive is required because Jetty pulls its modules
+                             (Bouncy Castle FIPS is provided, never embedded). Embed-Transitive is required because Jetty pulls its modules
                              (jetty-util/http/io, jakarta.websocket/servlet-api) transitively. slf4j-api is
                              NOT embedded: the framework exports SLF4J 2.x (Pax Logging 2.x), so Jetty's
                              logging binds to the framework's log4j2 and lands in main.log.

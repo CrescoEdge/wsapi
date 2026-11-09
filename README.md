@@ -44,9 +44,22 @@ allowed by the crypto policy, it is JKS, or it has expired.
 
 ### The production profile: client certificates only
 
-`security_profile=production` (the setting the controller reads too; as `-Dsecurity_profile=production`, the environment
-variable `CRESCO_security_profile` or the agent's configuration) is for secure deployments, where every certificate is
-issued and assigned in advance. Any other value, or none, is the debug profile: everything below works as described.
+`security_profile=production` is for secure deployments, where every certificate is issued and assigned in advance. It is
+the **node's** profile: wsapi follows its controller's answer (`PluginBuilder.getSecurityProfile()`, PRODUCTION when the
+controller cannot be asked), set as the agent's `security_profile` (`-Dsecurity_profile=production`, the environment
+variable `CRESCO_security_profile` or the agent's configuration). A `security_profile` in wsapi's own plugin
+configuration that names another profile than the node's is a conflict: wsapi does not start (ERROR `wsapi NOT started:
+security_profile=... in wsapi's configuration, but this node's controller runs ...`). The profile is asked again at every
+login: while the node answers production, a wsapi that did not start in production refuses every login (503). The
+standard profile (or insecure debug mode) is everything below as described.
+
+**FIPS approved-only mode.** A production node runs its JVM in FIPS 140-3 approved-only mode (the agent's crypto modules,
+see the agent's README). wsapi's TLS then offers TLS 1.3 only (with the agent's default SunJSSE engine; TLS 1.3 and 1.2
+with `crypto_fips_tls=bcjsse`), its ciphers, key exchange and signatures from the FIPS modules, and
+`wsapi_ssl_provider=OPENSSL` (netty-tcnative, BoringSSL: not a FIPS module) is refused. Its managed keystore is BCFKS; a
+PKCS#12 keystore from an earlier standard-profile run is refused with how to convert it (`java -jar agent.jar --crypto
+convert-keystore ...`), or delete it and its password file to make a new one. Clients need nothing new: TLS 1.3 with
+AES-GCM and P-256/P-384 is what OpenSSL (pycrescolib) and the JDK (clientlib) offer by default.
 
 - **Mutual TLS on every endpoint** (API socket, dataplane, log stream): a client must present a certificate that chains
   to a CA of `wsapi_client_ca` (a PEM bundle; intermediates included) and is within its validity dates, or TLS refuses
@@ -80,7 +93,7 @@ issued and assigned in advance. Any other value, or none, is the debug profile: 
 
 | Config key | Default | Meaning |
 |---|---|---|
-| `security_profile` | (debug) | `production`: client certificates only |
+| `security_profile` | (the node's) | only confirms the node's profile (the controller's); a different value stops wsapi |
 | `wsapi_client_ca` | | production: the client CA bundle (PEM); required |
 | `wsapi_client_deny_file` | | production: revoked client certificates by SHA-256 fingerprint |
 | `wsapi_client_crl` | | production: CRLs of the client CAs (PEM or DER) |
