@@ -21,6 +21,8 @@ import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.ssl.SslProvider;
+import java.util.ArrayList;
+import java.util.List;
 
 import javax.net.ssl.KeyManagerFactory;
 import java.security.KeyStore;
@@ -81,6 +83,12 @@ public class NettyWsServer {
         // so a misconfig or a platform without the native classifier never breaks the server.
         SslProvider provider = SslProvider.JDK;
         String requested = plugin.getConfig().getStringParam("wsapi_ssl_provider", "JDK");
+        boolean fips = fipsMode();
+        if (fips && "OPENSSL".equalsIgnoreCase(requested)) {
+            // netty-tcnative (BoringSSL) is not a FIPS 140-3 module: in FIPS mode TLS is the JDK's, over the FIPS modules
+            throw new IllegalStateException("wsapi_ssl_provider=OPENSSL: this agent runs in FIPS approved-only mode, where TLS uses "
+                    + "only the FIPS modules and netty-tcnative (BoringSSL) is not one; remove the setting");
+        }
         if ("OPENSSL".equalsIgnoreCase(requested)) {
             if (OpenSsl.isAvailable()) {
                 provider = SslProvider.OPENSSL;
@@ -94,7 +102,8 @@ public class NettyWsServer {
         }
         SslContextBuilder b = SslContextBuilder.forServer(kmf)
                 .sslProvider(provider)
-                .protocols("TLSv1.3", "TLSv1.2");
+                .protocols(protocols(fips));
+        if (fips) logger.info("wsapi TLS in FIPS approved-only mode: " + String.join(", ", protocols(true)) + ", ciphers and keys from the FIPS modules");
         if (gate != null && gate.authenticator != null && gate.authenticator.production()) {
             // security_profile=production: every connection presents a client certificate chaining to wsapi_client_ca
             // (checked here, with its validity dates); who it is and whether it is revoked, the Authenticator decides
@@ -103,6 +112,23 @@ public class NettyWsServer {
                     + " client CA(s) (security_profile=production)");
         }
         return b.build();
+    }
+
+    /** The agent set the JVM's crypto to FIPS approved-only mode (agent CryptoBoot: {@code cresco.crypto.fips}). */
+    static boolean fipsMode() {
+        return Boolean.getBoolean("cresco.crypto.fips");
+    }
+
+    /**
+     * The TLS versions offered: 1.3 and 1.2; in FIPS mode those the agent's FIPS TLS supports ({@code cresco.crypto.fips.tls}:
+     * TLS 1.3 with SunJSSE, whose TLS 1.2 key derivation is not a FIPS module's; 1.3 and 1.2 with BCJSSE).
+     */
+    static String[] protocols(boolean fips) {
+        if (!fips) return new String[]{"TLSv1.3", "TLSv1.2"};
+        String p = System.getProperty("cresco.crypto.fips.tls", "TLSv1.3");
+        List<String> out = new ArrayList<>();
+        for (String v : p.split(",")) if (v.trim().equals("TLSv1.3") || v.trim().equals("TLSv1.2")) out.add(v.trim());
+        return out.isEmpty() ? new String[]{"TLSv1.3"} : out.toArray(new String[0]);
     }
 
     public void start() throws Exception {

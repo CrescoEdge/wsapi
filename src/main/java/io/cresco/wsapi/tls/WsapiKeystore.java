@@ -351,6 +351,7 @@ public final class WsapiKeystore {
             throw new Refused("cannot read the wsapi keystore " + ks + ": " + e.getMessage(), e);
         }
         List<String> tried = new ArrayList<>();
+        String fipsFormat = null;
         for (Object[] c : candidates) {
             char[] pw = (char[]) c[0];
             tried.add((String) c[1]);
@@ -359,8 +360,13 @@ public final class WsapiKeystore {
                 store.load(in, pw);
                 return new Opened(store, pw, (String) c[1], jks);
             } catch (Exception wrong) {
-                // the next candidate
+                // the next candidate; in FIPS mode a PKCS#12 file is refused whatever the password (keystores are BCFKS there)
+                if (wrong.getMessage() != null && wrong.getMessage().contains("FIPS approved-only mode")) fipsFormat = wrong.getMessage();
             }
+        }
+        if (fipsFormat != null) {
+            throw new Refused("the wsapi keystore " + ks + " is " + fipsFormat + " Or delete " + ks + " and " + passFile
+                    + " to make a new one (clients must then trust the new fingerprint)");
         }
         throw new Refused("the wsapi keystore " + ks + " does not open with " + String.join(", ", tried)
                 + "; it may have been replaced. Delete " + ks + " and " + passFile
