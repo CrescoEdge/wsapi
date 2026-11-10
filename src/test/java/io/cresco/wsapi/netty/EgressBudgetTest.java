@@ -61,6 +61,26 @@ class EgressBudgetTest {
     }
 
     @Test
+    void theProcessBudgetHoldsWhoeverIsOverTheirShareNotAConsumerThatKeepsUp() {
+        long base = EgressBudget.GLOBAL_PENDING.get();
+        long hogBytes = Math.max(4 * MIB, base + FRAME);
+        long global = base + hogBytes - 1;      // one consumer alone takes the process past its budget
+        EgressBudget hog = new EgressBudget(64 * hogBytes, global), reader = new EgressBudget(32 * MIB, global);
+        hog.add(hogBytes);
+        assertTrue(hog.over(), "the consumer that holds the process budget waits");
+        assertFalse(reader.over(), "a consumer with nothing queued never waits for someone else's backlog");
+        assertTrue(reader.drained());
+        reader.add(1024);
+        assertFalse(reader.over(), "nor one within its share of the budget");
+        assertTrue(reader.drained());
+        reader.release(1024);
+        hog.release(hogBytes - 1);
+        assertTrue(hog.drained(), "its own backlog written: the listener goes on");
+        hog.release(1);
+        assertEquals(base, EgressBudget.GLOBAL_PENDING.get());
+    }
+
+    @Test
     void theDefaultProcessBudgetIsAQuarterOfTheHeapAtMost512MiB() {
         long d = EgressBudget.defaultGlobalCap();
         assertTrue(d > 0 && d <= 512 * MIB && d <= Runtime.getRuntime().maxMemory() / 4, String.valueOf(d));

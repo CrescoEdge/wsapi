@@ -72,15 +72,18 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
     // its own) instead of losing frames; what it has not taken stays at the broker, which slows the stream's writers.
     /** Waits: a WS consumer fell more than its budget behind and its stream was held at the broker. */
     public static final java.util.concurrent.atomic.AtomicLong EGRESS_PAUSES = new java.util.concurrent.atomic.AtomicLong();
-    /** WS consumers closed because, held, they read nothing for wsapi_dataplane_stall_close_ms. */
+    /** WS consumers closed because, held, they read less than half their budget in wsapi_dataplane_stall_close_ms. */
     public static final java.util.concurrent.atomic.AtomicLong EGRESS_STALLED = new java.util.concurrent.atomic.AtomicLong();
     /** Client frames the dataplane did not take (no session, controller not active): logged, never silent. */
     public static final java.util.concurrent.atomic.AtomicLong INGRESS_FAILED = new java.util.concurrent.atomic.AtomicLong();
     /** Woken whenever a frame's write completes, while the listener waits for its consumer to drain. */
     private final Object drained = new Object();
     private volatile boolean waiting;
-    private volatile long lastDrainMs;
+    /** Bytes this consumer has read (frames whose write completed). */
+    private final java.util.concurrent.atomic.AtomicLong egressRead = new java.util.concurrent.atomic.AtomicLong();
     private final long stallCloseMs;
+    /** What a held consumer has to read in every wsapi_dataplane_stall_close_ms: half its budget (see awaitDrain). */
+    private final long stallMinBytes;
     /** wsapi_dataplane_backpressure (default true): wait for a consumer past its budget; false: drop past it, counted. */
     private final boolean paced;
 
@@ -102,6 +105,7 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
         this.egress = new EgressBudget(egressCap,
                 plugin.getConfig().getLongParam("wsapi_dataplane_egress_global_bytes", EgressBudget.defaultGlobalCap()));
         this.stallCloseMs = Math.max(1000L, plugin.getConfig().getLongParam("wsapi_dataplane_stall_close_ms", 30_000L));
+        this.stallMinBytes = Math.max(1L, egressCap / 2);
         this.paced = plugin.getConfig().getBooleanParam("wsapi_dataplane_backpressure", true);
         this.sendThreads = Math.max(0, plugin.getConfig().getIntegerParam("wsapi_dataplane_send_threads", DataPlaneSends.defaultThreads()));
         this.ingressHigh = Math.max(1L << 20, plugin.getConfig().getLongParam("wsapi_dataplane_ingress_queue_bytes", 16L << 20));
@@ -123,7 +127,7 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
             egress.add(size);
             ch.writeAndFlush(frame).addListener(f -> {
                 egress.release(size);
-                lastDrainMs = System.currentTimeMillis();
+                if (f.isSuccess()) egressRead.addAndGet(size);
                 if (waiting) synchronized (drained) { drained.notifyAll(); }
             });
             if (egress.over()) awaitDrain(ch);
@@ -146,21 +150,29 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
     /**
      * The consumer is past its budget: wait, on this listener's own JMS session, until its backlog is back to half the
      * budget. Meanwhile its messages stay at the broker (prefetch, then the topic), whose flow control slows their writers.
-     * A consumer that drains nothing for wsapi_dataplane_stall_close_ms while frames wait for it is closed: a reader that
-     * stopped would otherwise hold its stream's writers -- all writers of the topic on that broker, once the topic's
-     * memory is full -- for as long as it stays connected.
+     * A consumer that, held here, reads less than half its budget in wsapi_dataplane_stall_close_ms is closed (one that
+     * reads nothing, after exactly that time): a reader that stopped would otherwise hold its stream's writers -- all
+     * writers of the topic on that broker, once the topic's memory is full -- for as long as it stays connected. Bytes
+     * over the time, not "any write at all": a reader that took one frame just before every stall time ran out was
+     * never closed, and held them as surely.
      */
     private void awaitDrain(Channel ch) {
         EGRESS_PAUSES.incrementAndGet();
-        long since = System.currentTimeMillis();
+        long windowStart = System.currentTimeMillis();
+        long readBefore = egressRead.get();
         waiting = true;
         try {
             synchronized (drained) {
                 while (ch.isActive() && !egress.drained()) {
                     long now = System.currentTimeMillis();
-                    if (egress.pending() > 0 && now - Math.max(since, lastDrainMs) > stallCloseMs) {
-                        closeStalled(ch);
-                        return;
+                    if (now - windowStart >= stallCloseMs) {
+                        long read = egressRead.get() - readBefore;
+                        if (read < stallMinBytes) {
+                            closeStalled(ch, read);
+                            return;
+                        }
+                        windowStart = now;                               // slow, but reading: the next stall time
+                        readBefore += read;
                     }
                     drained.wait(50);
                 }
@@ -172,13 +184,13 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
         }
     }
 
-    private void closeStalled(Channel ch) {
+    private void closeStalled(Channel ch, long read) {
         EGRESS_STALLED.incrementAndGet();
-        logger.warn("DataPlaneWsHandler: closing a dataplane consumer that read nothing for " + stallCloseMs + " ms with "
-                + egress.pending() + " B waiting (wsapi_dataplane_stall_close_ms): its stream was held at the broker,"
-                + " slowing its writers (wsapi.dataplane.egress.stalled total=" + EGRESS_STALLED.get() + ")");
-        ch.writeAndFlush(new io.netty.handler.codec.http.websocketx.CloseWebSocketFrame(1013, "stalled: nothing read in "
-                + stallCloseMs + " ms")).addListener(io.netty.channel.ChannelFutureListener.CLOSE);
+        logger.warn("DataPlaneWsHandler: closing a dataplane consumer that read " + read + " B in " + stallCloseMs + " ms (less than "
+                + stallMinBytes + " B, half its budget) with " + egress.pending() + " B waiting (wsapi_dataplane_stall_close_ms): its"
+                + " stream was held at the broker, slowing its writers (wsapi.dataplane.egress.stalled total=" + EGRESS_STALLED.get() + ")");
+        ch.writeAndFlush(new io.netty.handler.codec.http.websocketx.CloseWebSocketFrame(1013, "stalled: " + read + " B read in "
+                + stallCloseMs + " ms, less than " + stallMinBytes)).addListener(io.netty.channel.ChannelFutureListener.CLOSE);
         // a client that does not read does not read the close frame either
         try {
             ch.eventLoop().schedule(() -> { ch.close(); }, 2, java.util.concurrent.TimeUnit.SECONDS);
