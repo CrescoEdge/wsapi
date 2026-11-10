@@ -88,6 +88,41 @@ class InternalParamsTest {
     }
 
     @Test
+    void aClientSetsNeitherTheHopCountNorTheRpcFlag() throws Exception {
+        // the router counts hops in ttl (a negative one never reaches the limit) and the library answers what carries is_rpc
+        Map<String, String> payload = new HashMap<>();
+        payload.put("action", "listagents");
+        payload.put("client_rpc_id", "c3");
+        payload.put("ttl", String.valueOf(Integer.MIN_VALUE));
+        payload.put("is_rpc", "true");
+        Authenticator auth = new Authenticator(() -> null, () -> null, () -> false, () -> "tenant-a", Set::of,
+                AuthRateLimiter.defaults(), 0L, System::currentTimeMillis);
+        for (String role : new String[]{"user", "admin"}) {
+            Map<String, String> p = new HashMap<>(payload);
+            assertNull(ApiSocketWsHandler.vet(p, ApiEdgeRolesTest.principal("tenant-a", "bob", role, List.of()), auth));
+            assertEquals(Set.of("action", "client_rpc_id"), p.keySet(), role + ": ttl and is_rpc are the fabric's to write");
+        }
+
+        // sent without waiting for a reply (message_info says so): what wsapi hands to the controller carries neither
+        ReviewApiDataplaneTest.Recorder rec = new ReviewApiDataplaneTest.Recorder();
+        io.cresco.library.plugin.PluginBuilder plugin = ReviewApiDataplaneTest.plugin(rec);
+        List<Object[]> sent = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+        io.netty.channel.embedded.EmbeddedChannel ch = new io.netty.channel.embedded.EmbeddedChannel(new ApiSocketWsHandler(plugin,
+                ApiEdgeRolesTest.principal("tenant-a", "bob", "user", List.of()), ReviewApiDataplaneTest.gate(plugin, sent)));
+        ch.writeInbound(new io.netty.handler.codec.http.websocketx.TextWebSocketFrame(GSON.toJson(Map.of(
+                "message_info", Map.of("message_type", "agent_msgevent", "message_event_type", "EXEC", "is_rpc", "false"),
+                "message_payload", payload))));
+        long until = System.currentTimeMillis() + 5_000;
+        while (sent.isEmpty() && System.currentTimeMillis() < until) Thread.sleep(10);
+        assertEquals(1, sent.size());
+        MsgEvent m = (MsgEvent) sent.get(0)[0];
+        assertEquals("listagents", m.getParam("action"));
+        assertNull(m.getParam("ttl"), "the router starts the hop count");
+        assertNull(m.getParam("is_rpc"), "not an RPC: nothing answers it");
+        ch.finishAndReleaseAll();
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     void envelopePropertiesKeepTheStreamsAndTheSequenceNotTheStamps() throws Exception {
         ActiveMQTextMessage m = new ActiveMQTextMessage();
