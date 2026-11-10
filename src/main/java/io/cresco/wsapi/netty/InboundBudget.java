@@ -63,6 +63,28 @@ public final class InboundBudget {
         return n == null ? 0 : n.get();
     }
 
+    /**
+     * A message kept after it was handled (an API send waiting for its caller's turn, {@link ApiSocketWsHandler}): its
+     * {@code n} bytes stay counted for {@code caller} until {@link #released}, so what a caller has waiting leaves that
+     * much less for what it sends next.
+     */
+    void kept(String caller, long n) {
+        if (n <= 0) return;
+        byCaller.compute(caller, (k, v) -> {
+            if (v == null) v = new AtomicLong();
+            v.addAndGet(n);
+            return v;
+        });
+        inflight.addAndGet(n);
+    }
+
+    /** A kept message was sent (or given up): its bytes are free again. */
+    void released(String caller, long n) {
+        if (n <= 0) return;
+        inflight.addAndGet(-n);
+        byCaller.computeIfPresent(caller, (k, v) -> v.addAndGet(-n) <= 0 ? null : v);
+    }
+
     /** One connection's account. */
     final class Account {
         private final String caller;
