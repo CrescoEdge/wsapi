@@ -178,4 +178,99 @@ class ReviewApiRpcPoolTest {
             server.stop();
         }
     }
+
+    /** A frame that sends {@code action} without waiting for a reply, numbered {@code seq} on connection {@code conn}. */
+    static String sendFrame(String action, int conn, int seq) {
+        Map<String, Object> m = new HashMap<>();
+        m.put("message_info", Map.of("message_type", "agent_msgevent", "message_event_type", "EXEC", "is_rpc", "false"));
+        m.put("message_payload", Map.of("action", action, "conn", String.valueOf(conn), "seq", String.valueOf(seq)));
+        return new Gson().toJson(m);
+    }
+
+    static WsRouter.Gate gate(PluginBuilder plugin, ApiGateway gw) {
+        Authenticator auth = new Authenticator(CredentialStore::empty, () -> null, () -> true, () -> "tenant-a", Set::of,
+                AuthRateLimiter.defaults(), 0L, System::currentTimeMillis);
+        return new WsRouter.Gate(auth, gw, 1, 4, plugin.getLogger("review", io.cresco.library.utilities.CLogger.Level.Info));
+    }
+
+    @Test
+    void aSendWithoutAReplyNeverWaitsOnTheEventLoop() throws Exception {
+        PluginBuilder plugin = ReviewApiDataplaneTest.plugin(new DataPlaneBackpressureTest.Dataplane().proxy(), Map.of());
+        CountDownLatch controllerTakesIt = new CountDownLatch(1);
+        List<String> sent = Collections.synchronizedList(new ArrayList<>());
+        List<String> threads = Collections.synchronizedList(new ArrayList<>());
+        ApiGateway slow = new ApiGateway() {
+            @Override public void send(MsgEvent msg, Authenticator.Principal caller) {
+                threads.add(Thread.currentThread().getName());
+                try {
+                    controllerTakesIt.await(20, TimeUnit.SECONDS);       // the control plane is reconnecting: a send waits
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                sent.add(msg.getParam("seq"));
+            }
+            @Override public MsgEvent rpc(MsgEvent msg, long timeoutMs, Authenticator.Principal caller) { return msg; }
+        };
+        io.netty.channel.embedded.EmbeddedChannel ch = new io.netty.channel.embedded.EmbeddedChannel(new ApiSocketWsHandler(plugin,
+                ApiEdgeRolesTest.principal("tenant-a", "waits-on-a-send", "user", List.of()), gate(plugin, slow)));
+        Thread eventLoop = new Thread(() -> {
+            for (int i = 0; i < 3; i++) ch.writeInbound(new io.netty.handler.codec.http.websocketx.TextWebSocketFrame(sendFrame("slow", 0, i)));
+        }, "event-loop");
+        eventLoop.setDaemon(true);
+        eventLoop.start();
+        try {
+            eventLoop.join(3_000);
+            assertFalse(eventLoop.isAlive(), "the event loop (every other connection it serves) waited for the controller to take a send");
+            assertEquals(List.of(), sent, "control: the controller has not taken any yet");
+        } finally {
+            controllerTakesIt.countDown();
+        }
+        long until = System.currentTimeMillis() + 5_000;
+        while (sent.size() < 3 && System.currentTimeMillis() < until) Thread.sleep(10);
+        assertEquals(List.of("0", "1", "2"), sent, "every send, in the order the connection sent them");
+        assertFalse(threads.contains("event-loop"), threads.toString());
+        ch.finishAndReleaseAll();
+    }
+
+    @Test
+    void sendsWithoutAReplyAreHeldToTheCallersRateAndNoneIsLost() throws Exception {
+        // 100 sends a second for this user, all its connections together (one second's worth at once)
+        PluginBuilder plugin = ReviewApiDataplaneTest.plugin(new DataPlaneBackpressureTest.Dataplane().proxy(),
+                Map.of("wsapi_send_max_per_second_user", "100"));
+        List<int[]> sent = Collections.synchronizedList(new ArrayList<>());
+        ApiGateway gw = new ApiGateway() {
+            @Override public void send(MsgEvent msg, Authenticator.Principal caller) {
+                sent.add(new int[]{Integer.parseInt(msg.getParam("conn")), Integer.parseInt(msg.getParam("seq"))});
+            }
+            @Override public MsgEvent rpc(MsgEvent msg, long timeoutMs, Authenticator.Principal caller) { return msg; }
+        };
+        WsRouter.Gate gate = gate(plugin, gw);
+        io.netty.channel.embedded.EmbeddedChannel[] conn = new io.netty.channel.embedded.EmbeddedChannel[2];
+        for (int c = 0; c < 2; c++) {
+            conn[c] = new io.netty.channel.embedded.EmbeddedChannel(new ApiSocketWsHandler(plugin,
+                    ApiEdgeRolesTest.principal("tenant-a", "sends-at-wire-rate", "user", List.of()), gate));
+        }
+        long t0 = System.currentTimeMillis();
+        for (int i = 0; i < 150; i++) {
+            for (int c = 0; c < 2; c++) conn[c].writeInbound(new io.netty.handler.codec.http.websocketx.TextWebSocketFrame(sendFrame("flood", c, i)));
+        }
+        Thread.sleep(200);
+        long early = sent.size(), elapsed = System.currentTimeMillis() - t0;
+        assertTrue(early <= 100 + elapsed / 10 + 5, early + " of 300 sends reached the controller in " + elapsed
+                + " ms: a user's sends are limited to 100 a second, as its RPCs are to those in flight");
+        assertFalse(conn[0].config().isAutoRead(), "more wait than a connection may hold: wsapi stops reading from it (TCP holds the client)");
+
+        long until = System.currentTimeMillis() + 10_000;
+        while (sent.size() < 300 && System.currentTimeMillis() < until) Thread.sleep(20);
+        long took = System.currentTimeMillis() - t0;
+        assertEquals(300, sent.size(), "held back, never dropped");
+        assertTrue(took >= 1_800, "300 sends at 100 a second after the first 100 take 2 s, took " + took + " ms");
+        int[] next = new int[2];
+        for (int[] s : sent) assertEquals(next[s[0]]++, s[1], "connection " + s[0] + ": in the order it sent them");
+        for (int c = 0; c < 2; c++) {
+            conn[c].runPendingTasks();
+            assertTrue(conn[c].config().isAutoRead(), "reading goes on once they are sent");
+            conn[c].finishAndReleaseAll();
+        }
+    }
 }

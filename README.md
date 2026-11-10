@@ -232,7 +232,13 @@ on a long-lived connection (GaiaKeep's tooling holds its connections open) kept 
 **API requests.** A caller has at most `wsapi_rpc_max_inflight_user` (8) or `wsapi_rpc_max_inflight_admin` (32) RPCs in
 flight across its connections; more are answered at once with status `429` (busy), and a full pool with `503`; an RPC
 never runs on a network thread. A `user` asks for at most `wsapi_rpc_max_timeout_user_ms` (120 s) per RPC, an admin up
-to an hour. A `user` may address only its agent's own region (an agent joins only a region controller of its own
+to an hour. A message sent without waiting for a reply (`is_rpc` false) has no reply to count, so a caller's sends are
+limited as a rate: `wsapi_send_max_per_second_user` (50) or `wsapi_send_max_per_second_admin` (500) a second across its
+connections, one second's worth at once. They are handed to the controller off the network threads, one at a time for
+each caller, in the order they arrived; what arrives faster waits and is never dropped (wsapi stops reading from a
+connection with 64 sends, or 1 MiB of them, waiting until half are sent, so TCP holds the client, and what waits counts
+as the caller's inbound bytes in flight). A send and an RPC that follows it on the same connection may reach the
+controller in either order. A `user` may address only its agent's own region (an agent joins only a region controller of its own
 tenant, so that is the one region known to be the user's tenant; the controller does not tell wsapi the tenant of
 other regions): a message to another region, or to a global controller in another region, is refused (403).
 
@@ -300,6 +306,7 @@ envelope frame's `properties` carry no `cresco_*` property but the stream's sequ
 | `wsapi_allowed_origins` | (none) | browser Origins allowed besides wsapi's own, comma-separated `https://host[:port]` |
 | `wsapi_rpc_max_inflight_user` / `wsapi_rpc_max_inflight_admin` | 8 / 32 | RPCs in flight per caller |
 | `wsapi_rpc_max_timeout_user_ms` | 120000 | longest RPC timeout a `user` may ask for |
+| `wsapi_send_max_per_second_user` / `wsapi_send_max_per_second_admin` | 50 / 500 | messages without a reply (`is_rpc` false) per caller per second; more wait, none is dropped |
 | `wsapi_tls_keep_legacy_keystore` | false | keep a legacy keystore presumed exposed (WARNING at every start) |
 | `wsapi_upgrade_timeout_seconds` | 30 | a connection that has not completed an authenticated WebSocket upgrade by then is closed |
 | `wsapi_api_max_message_bytes` | 67108864 (64 MiB) | largest API-socket message; room for a plugin jar upload (base64, about 4/3 of the jar) |
