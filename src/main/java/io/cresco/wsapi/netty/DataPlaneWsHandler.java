@@ -56,6 +56,7 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
     private volatile String listenerId;
     private volatile StreamInfo streamInfo;
     private volatile int shard = 0;
+    private volatile int shards = 1;
     // frames dropped in the current overload episode (reset, with a summary line, when the consumer drains)
     private final java.util.concurrent.atomic.AtomicLong droppedFrames =
             new java.util.concurrent.atomic.AtomicLong();
@@ -201,10 +202,11 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
 
     /**
      * Publish a client frame: inline, or on this connection's send thread with reading paused while more than
-     * wsapi_dataplane_ingress_queue_bytes wait (order is kept: one connection, one send thread).
+     * wsapi_dataplane_ingress_queue_bytes wait (order is kept: one connection, one send thread, which it shares only with
+     * connections of its own shard, i.e. its own topic).
      */
     private void publish(Channel ch, Message m, long bytes) {
-        if (sendThreads > 0 && sendExec == null) sendExec = DataPlaneSends.next(sendThreads);
+        if (sendThreads > 0 && sendExec == null) sendExec = DataPlaneSends.next(sendThreads, shard, shards);
         io.netty.util.concurrent.EventExecutor exec = sendExec;
         if (exec == null) {
             send(m);
@@ -473,6 +475,7 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
         // Shard is derived from the stream ident -- the one key both the publishing endpoint and the
         // subscribing endpoint share -- so both land on the same shard-topic (global.event.<shard>).
         this.shard = plugin.getAgentService().getDataPlaneService().shardFor(si.getIdentId());
+        this.shards = plugin.getAgentService().getDataPlaneService().getDataPlaneShardCount();
         response.putAll(activationReply(() -> createListener(ctx, si, selector)));
         String code = response.get("status_code");
         if (STATUS_ACTIVE.equals(code) || STATUS_SUBSCRIPTION_REFUSED.equals(code)) {

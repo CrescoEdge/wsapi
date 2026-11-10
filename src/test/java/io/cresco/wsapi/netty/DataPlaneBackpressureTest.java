@@ -45,6 +45,10 @@ class DataPlaneBackpressureTest {
         final AtomicReference<MessageListener> listener = new AtomicReference<>();
         final List<Integer> sent = Collections.synchronizedList(new ArrayList<>());
         volatile CountDownLatch holdSends = new CountDownLatch(0);
+        /** dataplane_shards: with 2, the stream "held" is on shard 0 and every other stream on shard 1. */
+        volatile int shards = 1;
+        /** Shard 0's topic is full (producer flow control): a send to it waits. */
+        volatile CountDownLatch holdShard0 = new CountDownLatch(0);
 
         DataPlaneService proxy() {
             return (DataPlaneService) Proxy.newProxyInstance(DataPlaneService.class.getClassLoader(), new Class[]{DataPlaneService.class},
@@ -55,6 +59,7 @@ class DataPlaneBackpressureTest {
                             case "createBytesMessage": return new ActiveMQBytesMessage();
                             case "sendMessage":
                                 holdSends.await(30, TimeUnit.SECONDS);
+                                if (shards > 1 && Integer.valueOf(0).equals(a[a.length - 1])) holdShard0.await(30, TimeUnit.SECONDS);
                                 for (Object o : a) {
                                     if (o instanceof ActiveMQBytesMessage) {
                                         ActiveMQBytesMessage bm = (ActiveMQBytesMessage) o;
@@ -63,8 +68,8 @@ class DataPlaneBackpressureTest {
                                     }
                                 }
                                 return true;
-                            case "shardFor": return 0;
-                            case "getDataPlaneShardCount": return 1;
+                            case "shardFor": return shards > 1 && !"held".equals(a[0]) ? 1 : 0;
+                            case "getDataPlaneShardCount": return shards;
                             case "hashCode": return 11;
                             case "equals": return p == a[0];
                             case "toString": return "BackpressureDataplane";
@@ -196,6 +201,36 @@ class DataPlaneBackpressureTest {
         assertNotNull(close, "the client is told why: a close frame");
         assertEquals(1013, close.statusCode());
         ch.finishAndReleaseAll();
+    }
+
+    @Test
+    void aStreamWhoseTopicIsFullDoesNotHoldTheSendThreadsOfStreamsOnOtherTopics() throws Exception {
+        Dataplane dp = new Dataplane();
+        dp.shards = 2;                                                  // two topics, each with its own flow control
+        dp.holdShard0 = new CountDownLatch(1);                          // one of them is full: a send to it waits
+        PluginBuilder plugin = ReviewApiDataplaneTest.plugin(dp.proxy(), Map.of("wsapi_dataplane_send_threads", "2"));
+        List<EmbeddedChannel> open = new ArrayList<>();
+        try {
+            for (int i = 0; i < 34; i++) {                              // more connections than there can be send threads (32)
+                EmbeddedChannel ch = new EmbeddedChannel(new DataPlaneWsHandler(plugin,
+                        ReviewApiDataplaneTest.principal("tenant-a", "root", "admin"), ReviewApiDataplaneTest.gate(plugin, new ArrayList<>())));
+                open.add(ch);
+                ch.writeInbound(new TextWebSocketFrame(new Gson().toJson(Map.of("ident_key", "stream_name", "ident_id", i == 0 ? "held" : "free-" + i))));
+                assertEquals("10", ReviewApiDataplaneTest.reply(ch).get("status_code"));
+                byte[] b = new byte[64];
+                ByteBuffer.wrap(b).putInt(i);
+                ch.writeInbound(new BinaryWebSocketFrame(Unpooled.wrappedBuffer(b)));   // the first one waits in its send
+            }
+            long until = System.currentTimeMillis() + 5000;
+            while (dp.sent.size() < 33 && System.currentTimeMillis() < until) Thread.sleep(10);
+            List<Integer> missing = new ArrayList<>();
+            for (int i = 1; i < 34; i++) if (!dp.sent.contains(i)) missing.add(i);
+            assertEquals(List.of(), missing, "streams on the topic that has room, not published in 5 s while another topic is full");
+            assertFalse(dp.sent.contains(0), "control: the stream on the full topic is still waiting");
+        } finally {
+            dp.holdShard0.countDown();
+            for (EmbeddedChannel ch : open) ch.finishAndReleaseAll();
+        }
     }
 
     /** Completes every write at once: a WebSocket client that reads as fast as it is sent to. */
