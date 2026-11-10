@@ -72,7 +72,10 @@ AES-GCM and P-256/P-384 is what OpenSSL (pycrescolib) and the JDK (clientlib) of
   `-addext "subjectAltName=URI:cresco:api:default/gaiakeep,URI:cresco:role:admin"`.
 - **Passwords and the service key are refused** (401, "disabled (security_profile=production)"), even over a valid
   certificate. **API tokens are refused** too, unless `wsapi_allow_tokens=true`; then a token works over a client
-  certificate (TLS still requires one) and the caller is the token's user.
+  certificate (TLS still requires one) and the caller is the token's user. The certificate is checked first, as for a
+  certificate login (deny list, CRL, expiry; it need not name a caller), and stays part of the session's credential: a
+  token opens no session over a revoked certificate, and revoking the certificate closes the token sessions opened
+  over it.
 - **Revocation**, re-read within a second of a change and applied to open connections as well (closed with 1008, like
   a revoked token): a deny list, `wsapi_client_deny_file` (one SHA-256 certificate fingerprint per line, hex with or
   without colons, `sha256:` optional, `#` comments), and a CRL file, `wsapi_client_crl` (PEM or DER, every CRL signed by

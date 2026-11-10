@@ -130,7 +130,8 @@ public final class Authenticator {
     /**
      * The credential a principal was accepted with, so an open connection can be checked again ({@link #revocation}):
      * a password (its user's stored hash, tenant, role and grants as accepted), an API token (its id and stored hash, and
-     * its user as accepted), or the service key (an HMAC of the key under this process's random key, never the key).
+     * its user as accepted; in production also the client certificate it was accepted over), or the service key (an HMAC
+     * of the key under this process's random key, never the key).
      */
     static final class Credential {
         enum Kind { PASSWORD, TOKEN, SERVICE_KEY, CERTIFICATE }
@@ -138,7 +139,7 @@ public final class Authenticator {
         final Kind kind;
         final String user, tokenId, tokenSha384, keyMac;
         final CredentialStore.Entry entry;
-        /** A client certificate (production) and its SHA-256 fingerprint. */
+        /** A client certificate (production: the credential itself, or the one a token was accepted over) and its SHA-256 fingerprint. */
         final java.security.cert.X509Certificate certificate;
         final String certFingerprint;
         /** The last store this credential was found unchanged in (stores are immutable, replaced on every change). */
@@ -170,8 +171,10 @@ public final class Authenticator {
             return new Credential(Kind.PASSWORD, e.user, e, null, null, null, s);
         }
 
-        static Credential token(CredentialStore s, CredentialStore.Token t, CredentialStore.Entry e) {
-            return new Credential(Kind.TOKEN, e.user, e, t.id, t.sha384, null, s);
+        /** {@code overCertificate}: the client certificate the token was accepted over (production), or null. */
+        static Credential token(CredentialStore s, CredentialStore.Token t, CredentialStore.Entry e,
+                                java.security.cert.X509Certificate overCertificate) {
+            return new Credential(Kind.TOKEN, e.user, e, t.id, t.sha384, null, s, overCertificate);
         }
 
         static Credential serviceKey(String keyMac) {
@@ -308,7 +311,7 @@ public final class Authenticator {
                     + "(restart wsapi)", "node profile production, wsapi not in production", null);
         }
         if (authorization != null && authorization.regionMatches(true, 0, "Bearer ", 0, 7)) {
-            return token(authorization.substring(7).trim(), source, tenant);
+            return token(authorization.substring(7).trim(), source, tenant, null);
         }
         if (authorization != null) {
             String[] up = parseBasic(authorization);
@@ -335,8 +338,11 @@ public final class Authenticator {
      * cannot be guessed, so neither strangers guessing its user's password nor a guesser behind the same address (a NAT)
      * can lock a tool out. Wrong and expired tokens count against their source, and a locked source's wrong tokens are
      * answered 429.
+     *
+     * @param overCertificate production: the client certificate the token is presented over, already checked; it stays
+     *                        part of the session's credential ({@link #revocation})
      */
-    private Result token(String presented, String source, String tenant) {
+    private Result token(String presented, String source, String tenant, java.security.cert.X509Certificate overCertificate) {
         java.util.regex.Matcher m = CredentialStore.Token.FORM.matcher(presented);
         CredentialStore s = store.get();
         CredentialStore.Token t = m.matches() ? s.token(m.group(1)) : null;
@@ -344,7 +350,7 @@ public final class Authenticator {
         String why;
         if (valid && !t.expired(clock.getAsLong())) {
             CredentialStore.Entry e = s.get(t.user);
-            if (e != null) return accept(e, source, tenant, Credential.token(s, t, e));
+            if (e != null) return accept(e, source, tenant, Credential.token(s, t, e, overCertificate));
             why = "API token " + t.id + ": its user no longer exists";
         } else {
             why = !m.matches() ? "malformed API token" : t == null ? "unknown API token"
@@ -360,9 +366,23 @@ public final class Authenticator {
     private Result production(ClientCertificates certs, String authorization, String serviceKeyHeader, String source,
                               java.security.cert.X509Certificate cert, String tenant) {
         if (authorization != null && authorization.regionMatches(true, 0, "Bearer ", 0, 7)) {
-            if (allowTokens) return token(authorization.substring(7).trim(), source, tenant);
-            return Result.fail(401, "authentication failed: API tokens are disabled (security_profile=production)",
-                    "an API token, which production refuses (wsapi_allow_tokens is false)", null);
+            if (!allowTokens) {
+                return Result.fail(401, "authentication failed: API tokens are disabled (security_profile=production)",
+                        "an API token, which production refuses (wsapi_allow_tokens is false)", null);
+            }
+            // A token is accepted only over a client certificate that is itself accepted: the certificate is checked
+            // first, and stays part of the session's credential, so revoking it ends the session too (revocation). The
+            // token used to be checked alone: it opened sessions over a revoked certificate, which nothing checked again.
+            if (cert == null) {
+                return Result.fail(401, "authentication failed: a client certificate is required (security_profile=production)",
+                        "an API token without a client certificate", null);
+            }
+            String why = certs.revoked(cert);
+            if (why != null) {
+                return Result.fail(401, "authentication failed: the client certificate is not accepted",
+                        "an API token over a client certificate that is not accepted: " + why, null);
+            }
+            return token(authorization.substring(7).trim(), source, tenant, cert);
         }
         if (authorization != null) {
             String[] up = parseBasic(authorization);
@@ -615,7 +635,9 @@ public final class Authenticator {
      * <ul>
      *   <li>a password: its user was removed, its password changed, or its tenant, role or stream grants changed;</li>
      *   <li>an API token: it was revoked (or replaced), it expired, or its user was removed or changed tenant, role or
-     *       stream grants (a password change does not end a token's connections: the token itself is still valid);</li>
+     *       stream grants (a password change does not end a token's connections: the token itself is still valid); in
+     *       production also when the client certificate it was accepted over is revoked or expires;</li>
+     *   <li>a client certificate: it is on the deny list, revoked by a CRL or expired, or revocation cannot be checked;</li>
      *   <li>the service key: it was changed, disabled or found too weak;</li>
      *   <li>any of them: a caller of another tenant that is no longer an admin of a superuser tenant.</li>
      * </ul>
@@ -652,6 +674,11 @@ public final class Authenticator {
             if (why == null && c.kind == Credential.Kind.TOKEN) {
                 CredentialStore.Token t = s.token(c.tokenId);
                 if (t != null && t.expired(clock.getAsLong())) why = "its API token " + c.tokenId + " has expired";
+            }
+            if (why == null && c.kind == Credential.Kind.TOKEN && c.certificate != null) {
+                // production: the client certificate the token was accepted over is part of the credential
+                ClientCertificates certs = clientCertificates;
+                why = certs == null ? "client certificates are no longer accepted" : certs.revoked(c.certificate, c.certFingerprint);
             }
         }
         if (why != null) return why;
