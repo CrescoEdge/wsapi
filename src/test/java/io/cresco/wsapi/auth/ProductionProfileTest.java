@@ -228,6 +228,26 @@ class ProductionProfileTest {
     }
 
     @Test
+    void aTokenSessionEndsWithItsClientCertificateAndNoneStartsOverARevokedOne() throws Exception {
+        start(true);
+        Client c = new Client();
+        WebSocket ws = http(carol).newWebSocketBuilder().header("Authorization", "Bearer " + token)
+                .buildAsync(uri("/api/apisocket"), c).get(10, TimeUnit.SECONDS);
+        ws.sendText(rpc(), true).get(5, TimeUnit.SECONDS);
+        String reply = c.got.poll(5, TimeUnit.SECONDS);
+        assertNotNull(reply);
+        assertTrue(reply.contains("api:tenant-a/tool[admin]"), "the caller is the token's user: " + reply);
+
+        Files.writeString(denyFile, "# revoked\nsha256:" + ClientCertificates.fingerprint(carol.cert) + "\n");
+        assertTrue(within(4_000, () -> c.closedWith == 1008), "carol's certificate is on the deny list: the token session opened over it"
+                + " is closed like her own, " + c.closedWith);
+        assertEquals(401, status(carol, "Authorization", "Bearer " + token), "and the token opens no new session over the revoked certificate");
+        assertEquals(101, status(ops, "Authorization", "Bearer " + token), "the token itself is still good, over a certificate that is");
+        assertTrue(log.stream().anyMatch(l -> l.contains("(API token 0011223344556677)") && l.contains("is on the deny list (wsapi_client_deny_file)")),
+                String.join("\n", log));
+    }
+
+    @Test
     void theDenyListAndTheCrlRevokeOpenConnectionsAndAnUncheckableListAcceptsNone() throws Exception {
         start(false);
         Client c1 = new Client(), c2 = new Client(), c3 = new Client();
