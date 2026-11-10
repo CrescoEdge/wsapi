@@ -166,15 +166,67 @@ class ApiEdgeRolesTest {
     @Test
     void aUserAddressesOnlyItsOwnRegion() throws Exception {
         Authenticator.Principal bob = principal("tenant-a", "bob", "user", List.of());
-        assertNull(ApiSocketWsHandler.destinationRefusal(Map.of("message_type", "global_agent_msgevent", "dst_region", "r1", "dst_agent", "a2"), bob, "r1", "r1"));
-        assertNull(ApiSocketWsHandler.destinationRefusal(Map.of("message_type", "global_controller_msgevent"), bob, "r1", "r1"));
-        assertNull(ApiSocketWsHandler.destinationRefusal(Map.of("message_type", "plugin_msgevent"), bob, "r1", "rg"));
-        assertNotNull(ApiSocketWsHandler.destinationRefusal(Map.of("message_type", "global_agent_msgevent", "dst_region", "r2", "dst_agent", "a"), bob, "r1", "r1"));
-        assertNotNull(ApiSocketWsHandler.destinationRefusal(Map.of("message_type", "global_controller_msgevent"), bob, "r1", "rg"), "the global is in another region");
-        assertNotNull(ApiSocketWsHandler.destinationRefusal(Map.of("message_type", "global_controller_msgevent", "region_id", "r9", "agent_id", "x"), bob, "r1", "r1"));
-        assertNotNull(ApiSocketWsHandler.destinationRefusal(Map.of("message_type", "global_plugin_msgevent"), bob, "r1", "r1"), "no region named");
-        assertNull(ApiSocketWsHandler.destinationRefusal(Map.of("message_type", "global_agent_msgevent", "dst_region", "r2"),
-                principal("tenant-a", "alice", "admin", List.of()), "r1", "r1"), "admins are not limited here");
+        // messages as wsapi builds them on an agent of region-1 (what is judged), from a client's message_info
+        ApiSocketWsHandler wsapi = new ApiSocketWsHandler(ReviewApiDataplaneTest.plugin(new ReviewApiDataplaneTest.Recorder()), bob, null);
+        java.util.function.Function<Map<String, String>, MsgEvent> built = mi -> {
+            Map<String, String> info = new HashMap<>(mi);
+            info.put("message_event_type", "EXEC");
+            return wsapi.buildMsgEvent(Map.of("message_info", info, "message_payload", Map.of("action", "x")));
+        };
+        String r1 = "region-1";
+        assertNull(ApiSocketWsHandler.destinationRefusal(built.apply(Map.of("message_type", "global_agent_msgevent", "dst_region", r1, "dst_agent", "a2")), bob, r1, r1));
+        assertNull(ApiSocketWsHandler.destinationRefusal(built.apply(Map.of("message_type", "global_controller_msgevent")), bob, r1, r1));
+        assertNull(ApiSocketWsHandler.destinationRefusal(built.apply(Map.of("message_type", "plugin_msgevent", "dst_plugin", "plugin/1")), bob, r1, "rg"));
+        assertNull(ApiSocketWsHandler.destinationRefusal(built.apply(Map.of("message_type", "regional_controller_msgevent")), bob, r1, "rg"));
+        assertNotNull(ApiSocketWsHandler.destinationRefusal(built.apply(Map.of("message_type", "global_agent_msgevent", "dst_region", "r2", "dst_agent", "a")), bob, r1, r1));
+        assertNotNull(ApiSocketWsHandler.destinationRefusal(built.apply(Map.of("message_type", "global_controller_msgevent")), bob, r1, "rg"), "the global is in another region");
+        assertNotNull(ApiSocketWsHandler.destinationRefusal(built.apply(Map.of("message_type", "global_controller_msgevent", "region_id", "r9", "agent_id", "x")), bob, r1, r1));
+        assertNotNull(ApiSocketWsHandler.destinationRefusal(built.apply(Map.of("message_type", "global_controller_msgevent", "region_id", r1)), bob, r1, "rg"),
+                "naming its own region does not make a message for the global controller local");
+        assertNotNull(ApiSocketWsHandler.destinationRefusal(built.apply(Map.of("message_type", "global_controller_msgevent", "region_id", r1, "agent_id", "agent-1")), bob, r1, "rg"),
+                "nor does naming its own agent: the message is flagged global");
+        assertNotNull(ApiSocketWsHandler.destinationRefusal(built.apply(Map.of("message_type", "global_controller_msgevent")), bob, r1, null), "the global's region is not known");
+        assertNotNull(ApiSocketWsHandler.destinationRefusal(built.apply(Map.of("message_type", "global_plugin_msgevent")), bob, r1, r1), "no region named");
+        assertNotNull(ApiSocketWsHandler.destinationRefusal(built.apply(Map.of("message_type", "regional_controller_msgevent", "region_id", "r9", "agent_id", "x")), bob, r1, r1));
+        assertNotNull(ApiSocketWsHandler.destinationRefusal(null, bob, r1, r1), "nothing was built");
+        assertNull(ApiSocketWsHandler.destinationRefusal(built.apply(Map.of("message_type", "global_agent_msgevent", "dst_region", "r2", "dst_agent", "a")),
+                principal("tenant-a", "alice", "admin", List.of()), r1, r1), "admins are not limited here");
+    }
+
+    @Test
+    void aUserDoesNotReachAGlobalControllerInAnotherRegionByNamingItsOwnRegion() throws Exception {
+        // this agent is in region-1, the global controller in region-g
+        Map<String, Object> config = new HashMap<>();
+        config.put("pluginID", "plugin/9");
+        PluginBuilder plugin = io.cresco.wsapi.TestSupport.pluginBuilder(java.nio.file.Files.createTempDirectory("wsapi-edge"), config,
+                Collections.synchronizedList(new ArrayList<>()), null, "tenant-a", "region-g");
+        List<Object[]> sent = Collections.synchronizedList(new ArrayList<>());
+        EmbeddedChannel ch = new EmbeddedChannel(new ApiSocketWsHandler(plugin, principal("tenant-a", "bob", "user", List.of()),
+                ReviewApiDataplaneTest.gate(plugin, sent)));
+        // a message for the global controller, its region_id naming this agent's own region
+        for (Map<String, String> mi : List.of(
+                Map.of("message_type", "global_controller_msgevent", "message_event_type", "EXEC", "is_rpc", "true", "region_id", "region-1"),
+                Map.of("message_type", "global_controller_msgevent", "message_event_type", "EXEC", "is_rpc", "true", "region_id", "region-1",
+                        "agent_id", "agent-1"),
+                Map.of("message_type", "global_controller_msgevent", "message_event_type", "EXEC", "is_rpc", "true"))) {
+            ch.writeInbound(new TextWebSocketFrame(new Gson().toJson(Map.of("message_info", mi, "message_payload", Map.of("action", "listagents")))));
+            Object reply = null;
+            long until = System.currentTimeMillis() + 5_000;
+            while ((reply = ch.readOutbound()) == null && System.currentTimeMillis() < until) Thread.sleep(10);
+            assertNotNull(reply, "an RPC is answered");
+            Map<?, ?> r = new Gson().fromJson(((TextWebSocketFrame) reply).text(), Map.class);
+            assertEquals("403", r.get("status"), mi + " reached the global controller in region-g: " + r);
+            assertTrue(sent.isEmpty(), "nothing was sent");
+        }
+        // its own region's controller, and its own agent, as before
+        ch.writeInbound(new TextWebSocketFrame(new Gson().toJson(Map.of("message_info", Map.of("message_type", "regional_controller_msgevent",
+                "message_event_type", "EXEC", "is_rpc", "true"), "message_payload", Map.of("action", "listagents")))));
+        long until = System.currentTimeMillis() + 5_000;
+        while (sent.isEmpty() && System.currentTimeMillis() < until) Thread.sleep(10);
+        assertEquals(1, sent.size(), "a message to its own region is sent");
+        MsgEvent m = (MsgEvent) sent.get(0)[0];
+        assertTrue(m.isRegional() && !m.isGlobal() && "region-1".equals(m.getDstRegion()));
+        ch.finishAndReleaseAll();
     }
 
     static String source(String ip) throws Exception {
