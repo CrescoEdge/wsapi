@@ -67,7 +67,7 @@ public class PluginExecutor implements Executor {
                 metricEngine.setGauge("wsapi.auth.revoked.connections", "open connections closed because their credential was revoked or changed, since start", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
                 metricEngine.setGauge("wsapi.dataplane.egress.max.pending.bytes", "largest egress backlog one WS consumer reached since start (bytes)", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
                 metricEngine.setGauge("wsapi.dataplane.egress.paused", "times a WS consumer more than its budget behind had its stream held at the broker (backpressure: its writers slowed, nothing lost), since start", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
-                metricEngine.setGauge("wsapi.dataplane.egress.stalled", "WS consumers closed (1013) because, held, they read nothing for wsapi_dataplane_stall_close_ms, since start", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
+                metricEngine.setGauge("wsapi.dataplane.egress.stalled", "WS consumers closed (1013) because, held, they read less than half their budget in wsapi_dataplane_stall_close_ms, since start", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
                 metricEngine.setGauge("wsapi.dataplane.ingress.failed", "client dataplane frames the controller did not take (no session, controller not active), since start", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
             }
             metricEngine.updateIntGauge("wsapi.dataplane.connections", DataPlaneWsHandler.ACTIVE_CONNECTIONS.get());
