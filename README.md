@@ -265,7 +265,8 @@ writes on a message: the origin's end-to-end signature (`cresco_sig`, `cresco_si
 (`cresco_caller*`, the alias included), the namespace tenant (`cresco_tenant`), the routers' annotations
 (`routepath-*`, `linkcost-*`, `srcroute*`) and the RPC plumbing (`callId-*`, `is_rpc`); a failed RPC's echo of the
 request likewise. Every other reply parameter, and the client's own `client_rpc_id`, is passed through. The same names
-(except `cresco_tenant`, the tenant an admin addresses, and `is_rpc`) are removed from what a client sends. A dataplane
+(except `cresco_tenant`, the tenant an admin addresses) and the hop count `ttl` are removed from what a client sends:
+whether a request is an RPC is said in its `message_info`, and the routers count the hops. A dataplane
 envelope frame's `properties` carry no `cresco_*` property but the stream's sequence numbers `cresco_seq` and
 `cresco_gap` (how a consumer sees a loss); its writer is in the envelope's `writer` fields.
 

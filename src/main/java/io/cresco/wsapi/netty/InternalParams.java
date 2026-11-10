@@ -20,8 +20,11 @@ import java.util.Set;
  * echo of the request) is sent to the client. A client's own correlation parameters ({@code client_rpc_id} and any other
  * request parameter a responder echoes) are kept.
  *
- * <p>The same names, except {@code cresco_tenant} (a client's addressed tenant, vetted against its role) and
- * {@code is_rpc}, are removed from what a client sends: only infrastructure writes them.
+ * <p>The same names, except {@code cresco_tenant} (a client's addressed tenant, vetted against its role), are removed
+ * from what a client sends, and the hop count {@code ttl} with them: only infrastructure writes them. The router counts
+ * hops in {@code ttl} and drops a message past its limit, so a client's value (a negative one never reaches the limit)
+ * would let one message travel a routing loop without end; the library answers what carries {@code is_rpc}, and whether
+ * a client's message is an RPC is said in its {@code message_info} (the library then sets the parameter itself).
  *
  * <p>Dataplane envelope frames: every {@code cresco_*} property is infrastructure's, and is removed from
  * {@code properties}, except the stream's sequence numbers {@code cresco_seq} and {@code cresco_gap}, which are the
@@ -32,6 +35,9 @@ final class InternalParams {
 
     /** Exact reply parameter names infrastructure writes (beside the prefixes below). */
     static final Set<String> REPLY_EXACT = Set.of(TenantNamespace.TENANT_PARAM, "is_rpc");
+
+    /** Exact request parameter names only infrastructure writes (beside the prefixes below): the hop count, the RPC flag. */
+    static final Set<String> REQUEST_EXACT = Set.of("ttl", "is_rpc");
 
     /** Prefixes of parameter names only infrastructure writes, in replies and requests alike. */
     static final List<String> PREFIXES = List.of("cresco_sig", "cresco_caller", "routepath-", "linkcost-", "srcroute", "callId-");
@@ -53,7 +59,7 @@ final class InternalParams {
 
     /** Is a request parameter named {@code key} one only infrastructure writes (dropped from a client's request)? */
     static boolean internalRequest(String key) {
-        return key == null || prefixed(key) || Caller.RESERVED_PARAMS.contains(key);
+        return key == null || REQUEST_EXACT.contains(key) || prefixed(key) || Caller.RESERVED_PARAMS.contains(key);
     }
 
     /** Is a dataplane property named {@code key} infrastructure's (left out of an envelope's properties)? */
