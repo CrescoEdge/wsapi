@@ -194,34 +194,30 @@ public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFra
     }
 
     /**
-     * For a {@code user}, the region a message is addressed to must be this agent's own: an agent joins only a region
+     * For a {@code user}, the region a message goes to must be this agent's own: an agent joins only a region
      * controller of its own tenant, so this agent's region is the one region known to be the user's tenant (the
      * controller does not tell wsapi the tenant of other regions). Admins are not limited here; the controller authorizes
      * every message again.
      *
+     * <p>Decided from the message as it was built, which is what the routers act on, not from the client's
+     * message_info: its destination must be this region, and a message flagged global is handled by the global
+     * controller whatever destination it names, so it is allowed only while the global controller is in this region.
+     * (Read from message_info, a global_controller_msgevent with this region as its region_id and no agent_id passed as
+     * a message to this region, and was built without them: for the global controller, wherever that is.)
+     *
      * @return null when the destination is allowed, else why not
      */
-    static String destinationRefusal(Map<String, String> mi, Authenticator.Principal caller, String localRegion, String globalRegion) {
+    static String destinationRefusal(MsgEvent built, Authenticator.Principal caller, String localRegion, String globalRegion) {
         if (caller == null || caller.isAdmin()) return null;
-        if (mi == null) return "no message_info";
-        String type = mi.get("message_type");
-        String region;
-        if (type == null) return "no message_type";
-        switch (type) {
-            case "global_controller_msgevent":   region = mi.containsKey("region_id") ? mi.get("region_id") : globalRegion; break;
-            case "global_agent_msgevent":
-            case "global_plugin_msgevent":       region = mi.get("dst_region"); break;
-            case "regional_controller_msgevent": region = mi.containsKey("region_id") ? mi.get("region_id") : localRegion; break;
-            case "regional_agent_msgevent":
-            case "regional_plugin_msgevent":
-            case "kpi_msgevent":
-            case "agent_msgevent":
-            case "plugin_msgevent":              region = localRegion; break;
-            default: return "unknown message_type";
-        }
+        if (built == null) return "no message";
+        String region = built.getDstRegion();
         if (region == null || localRegion == null || !region.equals(localRegion)) {
             return caller + " may only address its own tenant's region " + localRegion + ", not " + region
                     + " (no other region is known to be in tenant " + caller.tenant + ")";
+        }
+        if (built.isGlobal() && !localRegion.equals(globalRegion)) {
+            return caller + " may only address its own tenant's region " + localRegion + ", not the global controller in "
+                    + globalRegion + " (no other region is known to be in tenant " + caller.tenant + ")";
         }
         return null;
     }
@@ -319,15 +315,16 @@ public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFra
             Map<String, String> payload = incoming == null ? null : incoming.get("message_payload");
             boolean isRPC = mi != null && Boolean.parseBoolean(mi.get("is_rpc"));
             String refusal = vet(payload, principal, gate == null ? null : gate.authenticator);
-            if (refusal == null) {
-                refusal = destinationRefusal(mi, principal, plugin.getRegion(), globalRegion());
+            // built before its destination is judged: the message itself says where it goes
+            MsgEvent request = refusal == null ? buildMsgEvent(incoming) : null;
+            if (refusal == null && request != null) {
+                refusal = destinationRefusal(request, principal, plugin.getRegion(), globalRegion());
             }
             if (refusal != null) {
                 logger.warn("wsapi refused a message from " + principal + ": " + refusal);
                 if (isRPC) ctx.writeAndFlush(new TextWebSocketFrame(failure(payload, "403", "unauthorized: " + refusal)));
                 return;
             }
-            MsgEvent request = buildMsgEvent(incoming);
             if (request == null) {
                 if (isRPC) ctx.writeAndFlush(new TextWebSocketFrame(failure(payload, "400", "unknown or malformed message_info")));
                 return;
@@ -429,7 +426,7 @@ public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFra
         return gson.toJson(r);
     }
 
-    private MsgEvent buildMsgEvent(Map<String, Map<String, String>> incoming) {
+    MsgEvent buildMsgEvent(Map<String, Map<String, String>> incoming) {
         MsgEvent request = null;
         try {
             Map<String, String> mi = incoming.get("message_info");

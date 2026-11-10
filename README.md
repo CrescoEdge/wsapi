@@ -240,7 +240,9 @@ connection with 64 sends, or 1 MiB of them, waiting until half are sent, so TCP 
 as the caller's inbound bytes in flight). A send and an RPC that follows it on the same connection may reach the
 controller in either order. A `user` may address only its agent's own region (an agent joins only a region controller of its own
 tenant, so that is the one region known to be the user's tenant; the controller does not tell wsapi the tenant of
-other regions): a message to another region, or to a global controller in another region, is refused (403).
+other regions): a message to another region, or to a global controller in another region, is refused (403). That is
+decided from the message wsapi builds, not from the `message_info` it was built from: its destination must be this
+region, and a message for the global controller is one whatever `region_id` and `agent_id` it names.
 
 **The log stream.** Only an admin (or the service key) may set log levels or log routing; a `user`'s configuration lines
 are refused, and its log stream never carries lines below `Warn` (Info, Debug and Trace can carry message contents).

@@ -43,13 +43,20 @@ public final class TestSupport {
      */
     public static PluginBuilder pluginBuilder(Path agentDataDir, Map<String, Object> config, List<String> log,
                                               java.util.function.Consumer<Object[]> onBehalf, String tenant) {
+        return pluginBuilder(agentDataDir, config, log, onBehalf, tenant, "region-1");
+    }
+
+    /** As above, on an agent of {@code region-1} whose global controller is in {@code globalRegion}. */
+    public static PluginBuilder pluginBuilder(Path agentDataDir, Map<String, Object> config, List<String> log,
+                                              java.util.function.Consumer<Object[]> onBehalf, String tenant, String globalRegion) {
         CLogger logger = logger(log);
         ControllerState cs = (ControllerState) Proxy.newProxyInstance(ControllerState.class.getClassLoader(),
                 new Class[]{ControllerState.class}, (proxy, m, args) -> {
                     switch (m.getName()) {
                         case "isActive": return true;
                         case "getControllerState": return ControllerMode.AGENT;
-                        case "getRegion": case "getRegionalRegion": case "getGlobalRegion": return "region-1";
+                        case "getRegion": case "getRegionalRegion": return "region-1";
+                        case "getGlobalRegion": return globalRegion;
                         case "getAgent": case "getRegionalAgent": case "getGlobalAgent": return "agent-1";
                         case "isRegionalController": case "isGlobalController": return false;
                         default: return null;
