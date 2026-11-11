@@ -54,6 +54,7 @@ public class PluginExecutor implements Executor {
             if (metricEngine == null) {
                 metricEngine = new MeasurementEngine(plugin);
                 metricEngine.setGauge("wsapi.dataplane.connections", "active dataplane WebSocket connections", "wsapi", CMetric.MeasureClass.GAUGE_INT);
+                metricEngine.setGauge("wsapi.api.unreadable", "API requests that could not be read (answered 400; the connection is closed at the third), since start", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
                 metricEngine.setGauge("wsapi.dataplane.bytes", "total dataplane bytes ingested", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
                 metricEngine.setGauge("wsapi.dataplane.messages", "total dataplane messages ingested", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
                 // no silent egress loss: every frame not delivered to a WS consumer is counted here
@@ -70,6 +71,7 @@ public class PluginExecutor implements Executor {
                 metricEngine.setGauge("wsapi.dataplane.egress.stalled", "WS consumers closed (1013) because, held, they read less than half their budget in wsapi_dataplane_stall_close_ms, since start", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
                 metricEngine.setGauge("wsapi.dataplane.ingress.failed", "client dataplane frames the controller did not take (no session, controller not active), since start", "wsapi", CMetric.MeasureClass.GAUGE_LONG);
             }
+            metricEngine.updateLongGauge("wsapi.api.unreadable", io.cresco.wsapi.netty.ApiSocketWsHandler.UNREADABLE_REQUESTS.get());
             metricEngine.updateIntGauge("wsapi.dataplane.connections", DataPlaneWsHandler.ACTIVE_CONNECTIONS.get());
             metricEngine.updateLongGauge("wsapi.dataplane.bytes", DataPlaneWsHandler.DATAPLANE_BYTES.get());
             metricEngine.updateLongGauge("wsapi.dataplane.messages", DataPlaneWsHandler.DATAPLANE_MESSAGES.get());

@@ -310,7 +310,16 @@ public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFra
         if (gate != null && !gate.admit(ctx.channel(), principal)) return;
         try {
             String message = ((TextWebSocketFrame) frame).text();
-            Map<String, Map<String, String>> incoming = gson.fromJson(message, TYPE);
+            Map<String, Map<String, String>> incoming;
+            try {
+                incoming = gson.fromJson(message, TYPE);
+            } catch (RuntimeException unreadable) {         // not JSON, or not a map of maps of strings
+                incoming = null;
+            }
+            if (incoming == null) {
+                refuseUnreadable(ctx, frame.content().readableBytes());
+                return;
+            }
             Map<String, String> mi = incoming == null ? null : incoming.get("message_info");
             Map<String, String> payload = incoming == null ? null : incoming.get("message_payload");
             boolean isRPC = mi != null && Boolean.parseBoolean(mi.get("is_rpc"));
@@ -376,6 +385,29 @@ public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFra
         } catch (Exception ex) {
             logger.error("ApiSocketWsHandler: " + ex.getMessage());
         }
+    }
+
+    /** Requests a connection may send that cannot be read before it is closed. */
+    static final int MAX_UNREADABLE_REQUESTS = 3;
+    /** Requests that could not be read, on every connection of this gateway. */
+    public static final java.util.concurrent.atomic.AtomicLong UNREADABLE_REQUESTS = new java.util.concurrent.atomic.AtomicLong();
+    private int unreadableRequests;
+
+    /**
+     * A request that is not a JSON object of {@code message_info} and {@code message_payload}: answered 400, once per
+     * frame. It used to be dropped with an ERROR line that carried the parser's message (a piece of the caller's text),
+     * and a caller that waited for an answer waited out its timeout. Whether it was an RPC, and which one, cannot be
+     * known, so the answer carries no request parameter. After {@link #MAX_UNREADABLE_REQUESTS} the connection is closed:
+     * no client sends these by accident.
+     */
+    private void refuseUnreadable(ChannelHandlerContext ctx, int bytes) {
+        UNREADABLE_REQUESTS.incrementAndGet();
+        boolean last = ++unreadableRequests >= MAX_UNREADABLE_REQUESTS;
+        logger.warn("wsapi could not read a request of " + bytes + " bytes from " + principal
+                + (last ? " (" + unreadableRequests + " on this connection: closing it)" : ""));
+        io.netty.channel.ChannelFuture f = ctx.writeAndFlush(new TextWebSocketFrame(failure(null, "400",
+                "unreadable request: not a JSON object of message_info and message_payload")));
+        if (last) f.addListener(io.netty.channel.ChannelFutureListener.CLOSE);
     }
 
     private String globalRegion() {

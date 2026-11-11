@@ -249,11 +249,31 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
         }
     }
 
+    /** This connection is in {@link #ACTIVE_CONNECTIONS}: counted once, taken out once. */
+    private boolean counted;
+
+    /**
+     * The router adds this handler during the WebSocket upgrade, when the channel has long been active, so
+     * {@code channelActive} is never called on it: the connections gauge read 0 whatever was connected. Counted here.
+     */
+    @Override
+    public void handlerAdded(ChannelHandlerContext ctx) throws Exception {
+        this.channel = ctx.channel();
+        if (ctx.channel().isActive()) countConnection();
+        super.handlerAdded(ctx);
+    }
+
     @Override
     public void channelActive(ChannelHandlerContext ctx) throws Exception {
         this.channel = ctx.channel();
-        ACTIVE_CONNECTIONS.incrementAndGet();
+        countConnection();
         super.channelActive(ctx);
+    }
+
+    private void countConnection() {
+        if (counted) return;
+        counted = true;
+        ACTIVE_CONNECTIONS.incrementAndGet();
     }
 
     @Override
@@ -640,7 +660,10 @@ public class DataPlaneWsHandler extends SimpleChannelInboundHandler<WebSocketFra
 
     @Override
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
-        ACTIVE_CONNECTIONS.updateAndGet(v -> v > 0 ? v - 1 : 0);
+        if (counted) {
+            counted = false;
+            ACTIVE_CONNECTIONS.decrementAndGet();
+        }
         if (listenerId != null) {
             try { plugin.getAgentService().getDataPlaneService().removeMessageListener(listenerId); } catch (Exception ignore) {}
         }
