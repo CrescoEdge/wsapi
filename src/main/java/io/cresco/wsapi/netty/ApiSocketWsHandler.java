@@ -446,7 +446,9 @@ public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFra
      * A failed RPC still answers, and carries the request's params back like any reply: a client that
      * correlates replies (pycrescolib's client_rpc_id) would otherwise discard it and wait out its own,
      * possibly much longer, timeout. Only small, non-secret params come back ({@link FailureEcho}): the
-     * reply must fit a client frame and must not repeat a secret.
+     * reply must fit a client frame and must not repeat a secret. {@code gateway_status} repeats the status: it says
+     * that wsapi gave this answer (400 unreadable or malformed, 403 refused here, 429 and 503 busy, 504 no reply in time,
+     * 500 the send failed), where the same {@code status} without it is the answer of the node that was asked.
      */
     static String failure(Map<String, String> payload, String status, String desc) {
         Map<String, String> r = InternalParams.reply(FailureEcho.params(payload));
@@ -455,6 +457,8 @@ public class ApiSocketWsHandler extends SimpleChannelInboundHandler<WebSocketFra
         r.put("status", status);
         r.put("status_desc", desc);
         r.put("error", desc);
+        // the gateway's own answer, not the target's: a node's reply never carries this (InternalParams.reply)
+        r.put(InternalParams.GATEWAY_STATUS, status);
         return gson.toJson(r);
     }
 
