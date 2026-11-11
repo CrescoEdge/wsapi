@@ -43,6 +43,7 @@
     </scm>
 
     <properties>
+        <cresco.commit>unknown</cresco.commit>
         <!-- jdk, encoding, plugin & OSGi API / gson versions inherited from cresco-parent -->
         <!-- Rebuilt on Jetty 12 (jakarta.servlet 6 / jakarta.websocket 2). Jetty 9.4 was EOL. -->
         <jetty.version>12.1.10</jetty.version>
@@ -208,6 +209,8 @@
                         <Bundle-Description>The Cresco websocket API</Bundle-Description>
                         <Bundle-Vendor>Cresco.io</Bundle-Vendor>
                         <Bundle-Version>${project.version}-${maven.build.timestamp}</Bundle-Version>
+                        <!-- the source commit this bundle was built from (CI passes -Dcresco.commit; a build by hand says unknown) -->
+                        <Cresco-Commit>${cresco.commit}</Cresco-Commit>
                         <!-- Real BundleActivator: sets JVM system properties at start. -->
                         <Bundle-Activator>io.cresco.wsapi.Activator</Bundle-Activator>
                         <!-- Cresco SPI + framework + Config Admin and Bouncy Castle FIPS (exported by the agent) are hard
