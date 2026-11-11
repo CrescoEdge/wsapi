@@ -70,7 +70,8 @@ class InternalParamsTest {
         payload.put("cresco_sig", "forged");
         payload.put("routepath-a", "1");
         Map<String, String> sent = GSON.fromJson(ApiSocketWsHandler.failure(payload, "504", "no reply"), SMAP);
-        assertEquals(Set.of("action", "client_rpc_id", "status", "status_desc", "error"), sent.keySet());
+        // gateway_status: the gateway's own mark on its own answers (GatewayStatusTest)
+        assertEquals(Set.of("action", "client_rpc_id", "status", "status_desc", "error", "gateway_status"), sent.keySet());
     }
 
     @Test

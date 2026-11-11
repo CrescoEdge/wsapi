@@ -33,8 +33,15 @@ import java.util.Set;
  */
 final class InternalParams {
 
+    /**
+     * In an answer wsapi itself gives (the request was refused, unreadable, not answered in time, or wsapi was busy): its
+     * status code. Only wsapi writes it: it is removed from every reply that comes from the fabric, so its presence
+     * tells a client that the gateway answered, not the node it asked.
+     */
+    static final String GATEWAY_STATUS = "gateway_status";
+
     /** Exact reply parameter names infrastructure writes (beside the prefixes below). */
-    static final Set<String> REPLY_EXACT = Set.of(TenantNamespace.TENANT_PARAM, "is_rpc");
+    static final Set<String> REPLY_EXACT = Set.of(TenantNamespace.TENANT_PARAM, "is_rpc", GATEWAY_STATUS);
 
     /** Exact request parameter names only infrastructure writes (beside the prefixes below): the hop count, the RPC flag. */
     static final Set<String> REQUEST_EXACT = Set.of("ttl", "is_rpc");
