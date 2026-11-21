@@ -42,7 +42,7 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <mojo.buildnumber.version>1.4</mojo.buildnumber.version>
         <jetty.version>9.4.57.v20241219</jetty.version>
-        <bouncycastle.version>1.78.1</bouncycastle.version>
+        <bouncycastle.version>1.84</bouncycastle.version>
         <jdk>21</jdk>
         <maven.compiler.version>3.13.0</maven.compiler.version>
         <maven.bundle.compiler.version>5.1.9</maven.bundle.compiler.version>
